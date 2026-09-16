@@ -16,10 +16,15 @@ right — and redraws the block in place. Any keypress (or Ctrl+C) stops it.
 - **GUI or CLI**: a Qt interface (`motionfetch gui`) where cropping is
   dragging a box over the video and the preview plays live — or do it all
   with flags from the terminal.
-- **Four looks**: truecolor pixel `blocks`, classic `ascii` ramp, high-detail
+- **Five looks**: truecolor pixel `blocks`; `dots`, a dense colored
+  dot-matrix like a tiny OLED screen; classic `ascii` ramp; high-detail
   `braille` (ordered dithering, tinted with your theme's accent at play time)
   — or `image`, the real untouched pixels, drawn with the kitty graphics
   protocol for terminals that support it (kitty, ghostty).
+- **Background removal**: pick the background color (an eyedropper in the
+  GUI, `--bg-color` in the CLI) and it disappears — empty cells in the text
+  styles, true transparency in `image`.
+- **Retime while converting**: `--speed 2` plays twice as fast, `0.5` half.
 - **Two stock animations out of the box**: the classic `donut`, and `logo` —
   the motionfetch M drawing itself. They're created on first run; everything
   else comes from your own videos and images.
@@ -54,9 +59,10 @@ On Arch: `sudo pacman -S --needed ffmpeg python-pipx` first.
 
 ## The GUI
 
-`motionfetch gui` (or `motionfetch-gui`) opens a Qt interface: open a video,
-**drag a box over the frame to crop** — no percentages, no video editor —
-tweak style/width/fps, watch the converted preview play live, and save.
+`motionfetch gui` (or `motionfetch-gui`) opens a Qt interface: open a video
+(**it plays right there** while you set things up), **drag a box over the
+frame to crop**, **click the background color to key it out**, tweak
+style/width/fps/speed, watch the converted preview play live, and save.
 The Library tab plays everything you've made, creates the per-animation
 commands, copies the command to the clipboard, exports, deletes.
 
@@ -86,6 +92,9 @@ motionfetch add clip.mp4 --name rain --width 48 --fps 15
 motionfetch add clip.mp4 --style ascii --gamma 0.6      # tintable text look
 motionfetch add photo.png --style braille --invert
 motionfetch add clip.mp4 --start 12 --duration 6        # just that section
+motionfetch add clip.mp4 --speed 2                      # twice as fast
+motionfetch add clip.mp4 --style dots \
+    --bg-color '#00b140' --bg-tolerance 20              # drop the greenscreen
 ```
 
 `add` shows a live preview and asks before saving; `--no-preview` skips that.
@@ -105,20 +114,35 @@ motionfetch add clip.mp4 --crop-left 10% --crop-right 10%
 | style | color | best for |
 | --- | --- | --- |
 | `blocks` | truecolor, 2 pixels per cell | video, photos (default) |
+| `dots` | truecolor dot-matrix, 8 dots per cell | the small-OLED look |
 | `ascii` | mono, tinted at play time | logo-like sources, theme integration |
 | `ascii-color` | truecolor characters | colorful sources with a retro look |
 | `braille` | mono, tinted at play time | line art, high detail |
 | `image` | the real pixels, not characters | kitty/ghostty terminals only |
 
-The same video in four styles:
+The same video across styles:
 
-| `blocks` | `ascii` |
+| `blocks` | `dots` |
 | --- | --- |
-| ![blocks](screenshots/video-blocks.gif) | ![ascii](screenshots/video-ascii.gif) |
+| ![blocks](screenshots/video-blocks.gif) | ![dots](screenshots/video-dots.gif) |
 
-| `braille` | `image` |
+| `ascii` | `braille` |
 | --- | --- |
-| ![braille](screenshots/video-braille.gif) | ![image](screenshots/video-image.gif) |
+| ![ascii](screenshots/video-ascii.gif) | ![braille](screenshots/video-braille.gif) |
+
+| `image` | |
+| --- | --- |
+| ![image](screenshots/video-image.gif) | |
+
+### Removing the background
+
+`ascii` and friends drop dark pixels on their own, but that only works when
+the background *is* dark (or bright, with `--invert`). For any other
+background, key it out by color: in the GUI press **Pick…** and click the
+background on the image; in the CLI pass `--bg-color '#rrggbb'`.
+`--bg-tolerance` controls how far a pixel may drift from that color and
+still be removed. In the `image` style the removed area becomes real
+transparency, so the terminal shows through.
 
 Mono animations pick their tint from `$MOTIONFETCH_TINT`, then
 `~/.config/quickshell/colors.json` (matugen setups), then a default blue —
@@ -165,8 +189,9 @@ motionfetch export donut hero.gif --fetch    # composed beside fastfetch
 
 ## How it works
 
-- Videos are decoded by ffmpeg (crop → fps → scale in one pass) and streamed
-  as raw RGB into the renderer; images go through Pillow.
+- Videos are decoded by ffmpeg (crop → retime → scale in one pass) and
+  streamed as raw RGB into the renderer; images go through Pillow; the
+  per-pixel math (luminance, dithering, color keying) is vectorized numpy.
 - `blocks` prints `▀` with a truecolor foreground/background per half-cell —
   two pixels per character.
 - Frames are stored as plain text files in

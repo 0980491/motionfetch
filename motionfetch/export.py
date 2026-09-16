@@ -110,6 +110,9 @@ def _blocks_pixels(frame, meta):
             if ch == "▀":
                 px[x, y * 2] = fg
                 px[x, y * 2 + 1] = bg or BG
+            elif ch == "▄":  # keyed-out top half
+                px[x, y * 2] = bg or BG
+                px[x, y * 2 + 1] = fg
             elif bg:
                 px[x, y * 2] = bg
                 px[x, y * 2 + 1] = bg
@@ -178,7 +181,9 @@ def render_pixel_frame(png_bytes, meta, cell_w, cell_h):
 
 def export(meta, frames, out_path, fps=None, font_size=15, tint=None,
            max_frames=None):
-    font = find_font(font_size, braille=meta.get("style") == "braille")
+    font = find_font(
+        font_size, braille=meta.get("style") in ("braille", "dots")
+    )
     # advance width, not ink width: text is drawn a whole run at a time,
     # so the per-cell step must match the font's own character advance
     cell_w = max(round(font.getlength("█")), 1)

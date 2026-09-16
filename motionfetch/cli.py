@@ -7,7 +7,7 @@ import sys
 from rich.console import Console
 from rich.table import Table
 
-from . import __version__, convert, generators, library, links, player
+from . import __version__, ansi, convert, generators, library, links, player
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, style="bold red", highlight=False)
@@ -60,6 +60,12 @@ def cmd_add(args):
         is_video = False  # Pillow reads GIF frames directly
 
     crop = crop_dict(args)
+    key = None
+    if args.bg_color:
+        rgb = ansi.parse_hex(args.bg_color)
+        if rgb is None:
+            die(f"bad --bg-color {args.bg_color!r} (use #rrggbb)")
+        key = (rgb, args.bg_tolerance)
     with console.status(f"converting [bold]{source}[/] → [bold]{name}[/] …"):
         if is_video:
             frames = list(
@@ -67,13 +73,13 @@ def cmd_add(args):
                     source, args.width, args.style, args.fps, crop,
                     start=args.start, duration=args.duration,
                     max_frames=args.max_frames, gamma=args.gamma,
-                    invert=args.invert,
+                    invert=args.invert, key=key, speed=args.speed,
                 )
             )
         else:
             frames = convert.image_frames(
                 source, args.width, args.style, crop,
-                gamma=args.gamma, invert=args.invert,
+                gamma=args.gamma, invert=args.invert, key=key,
             )
     if not frames:
         die("conversion produced no frames")
@@ -86,7 +92,10 @@ def cmd_add(args):
             1, round(args.width * frames[0].height / frames[0].width * 0.5)
         )
     else:
-        mode = "color" if args.style in ("blocks", "ascii-color") else "mono"
+        mode = (
+            "color" if args.style in ("blocks", "ascii-color", "dots")
+            else "mono"
+        )
         height = len(frames[0])
     meta = {
         "mode": mode,
@@ -377,9 +386,17 @@ def build_parser():
     a.add_argument("--crop-left", metavar="N")
     a.add_argument("--crop-right", metavar="N")
     a.add_argument("--gamma", type=float, default=1.0,
-                   help="brightness curve for ascii/braille (try 0.6)")
+                   help="brightness curve for ascii/braille/dots (try 0.6)")
     a.add_argument("--invert", action="store_true",
-                   help="light-on-dark ↔ dark-on-light for ascii/braille")
+                   help="light-on-dark ↔ dark-on-light for ascii/braille/dots")
+    a.add_argument("--bg-color", metavar="HEX",
+                   help="key out this background color (e.g. '#00ff00') — "
+                   "matching pixels become empty/transparent")
+    a.add_argument("--bg-tolerance", type=float, default=15, metavar="PCT",
+                   help="how far a pixel may drift from --bg-color and "
+                   "still be removed (percent, default 15)")
+    a.add_argument("--speed", type=float, default=1.0,
+                   help="retime the video: 2 = twice as fast, 0.5 = half")
     a.add_argument("--no-preview", action="store_true",
                    help="save without showing a preview first")
     a.add_argument("-f", "--force", action="store_true",

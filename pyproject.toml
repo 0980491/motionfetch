@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "0980491" }]
 requires-python = ">=3.9"
-dependencies = ["pillow>=9", "rich>=12"]
+dependencies = ["pillow>=9", "rich>=12", "numpy>=1.24"]
 keywords = ["fastfetch", "ascii-art", "terminal", "animation", "ansi"]
 classifiers = [
     "Environment :: Console",

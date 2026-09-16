@@ -291,7 +291,8 @@ def build_meta(frames, params):
             "source": os.path.basename(params["path"]),
         }
     return {
-        "mode": "color" if style in ("blocks", "ascii-color") else "mono",
+        "mode": "color"
+        if style in ("blocks", "ascii-color", "dots") else "mono",
         "style": style,
         "fps": params["fps"],
         "width": params["width"],
@@ -301,10 +302,12 @@ def build_meta(frames, params):
 
 
 class CropView(QWidget):
-    """Shows the source frame; drag to draw a crop box, drag inside to move
-    it, drag a corner to resize. `crop_dict()` feeds convert.crop_box."""
+    """Shows the source (videos play live); drag to draw a crop box, drag
+    inside to move it, drag a corner to resize. A one-shot eyedropper mode
+    picks the background color to key out."""
 
     changed = Signal()
+    color_picked = Signal(tuple)
 
     HANDLE = 12
 
@@ -312,18 +315,47 @@ class CropView(QWidget):
         super().__init__()
         self.setMinimumSize(420, 320)
         self._pix = None
+        self._pil = None           # full-res first frame, for the eyedropper
         self._src = QSize(1, 1)
         self._rect = None          # QRect in source pixels, or None = all
         self._mode = None
         self._anchor = QPoint()
+        self._picking = False
+        self._play = []            # scaled frames of the source, playing
+        self._play_i = 0
+        self._play_timer = QTimer(self)
+        self._play_timer.timeout.connect(self._play_tick)
         self.setCursor(Qt.CrossCursor)
 
     def set_image(self, pil_img):
         self._src = QSize(pil_img.width, pil_img.height)
+        self._pil = pil_img
         self._pix = pil_to_pixmap(pil_img)
         self._rect = None
+        self._play = []
+        self._play_timer.stop()
         self.update()
         self.changed.emit()
+
+    # ── live source playback ──
+
+    def add_play_frame(self, image, fps):
+        self._play.append(QPixmap.fromImage(image))
+        if len(self._play) == 1:
+            self._play_i = 0
+            self._play_timer.start(int(1000 / max(fps, 1)))
+
+    def _play_tick(self):
+        if self._play:
+            self._play_i = (self._play_i + 1) % len(self._play)
+            self.update()
+
+    # ── eyedropper ──
+
+    def start_picking(self):
+        if self._pil is not None:
+            self._picking = True
+            self.setCursor(Qt.PointingHandCursor)
 
     def clear_crop(self):
         self._rect = None
@@ -392,6 +424,14 @@ class CropView(QWidget):
     def mousePressEvent(self, ev):
         if not self._pix:
             return
+        if self._picking:
+            src = self._to_src(ev.position().toPoint())
+            self._picking = False
+            self.setCursor(Qt.CrossCursor)
+            self.color_picked.emit(
+                tuple(self._pil.getpixel((src.x(), src.y()))[:3])
+            )
+            return
         corner = self._corner_at(ev.position().toPoint())
         src = self._to_src(ev.position().toPoint())
         if corner:
@@ -455,7 +495,8 @@ class CropView(QWidget):
             int(ox), int(oy),
             int(self._src.width() * scale), int(self._src.height() * scale),
         )
-        p.drawPixmap(target, self._pix)
+        current = self._play[self._play_i] if self._play else self._pix
+        p.drawPixmap(target, current)
         if self._rect is not None:
             wr = self._to_widget(self._rect)
             shade = QColor(0, 0, 0, 140)
@@ -481,6 +522,50 @@ class CropView(QWidget):
                 p.drawRect(QRect(pt - QPoint(4, 4), QSize(8, 8)))
 
 
+class SourceLoader(QThread):
+    """Streams a low-res copy of the source video so the crop view can
+    play the original while you set things up."""
+
+    FPS = 12
+
+    frame_ready = Signal(QImage, int)
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+        self.stopped = False
+
+    def run(self):
+        try:
+            src_w, src_h = convert.probe_video(self.path)
+        except convert.ConvertError:
+            return
+        w = min(src_w, 560)
+        h = max(2, round(src_h * w / src_w / 2) * 2)
+        cmd = [
+            "ffmpeg", "-v", "error", "-i", self.path,
+            "-vf", f"fps={self.FPS},scale={w}:{h}",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+        ]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        try:
+            for _ in range(90):  # ~7 s of loop is plenty for a backdrop
+                if self.stopped:
+                    break
+                buf = proc.stdout.read(w * h * 3)
+                if len(buf) < w * h * 3:
+                    break
+                qimg = QImage(buf, w, h, w * 3, QImage.Format_RGB888).copy()
+                self.frame_ready.emit(qimg, self.FPS)
+                time.sleep(0.002)
+        finally:
+            proc.stdout.close()
+            proc.terminate()
+            proc.wait()
+
+
 class ConvertWorker(QThread):
     progress = Signal(int)
     done = Signal(list)
@@ -499,7 +584,7 @@ class ConvertWorker(QThread):
                     p["path"], p["width"], p["style"], p["fps"], p["crop"],
                     start=p["start"], duration=p["duration"],
                     max_frames=p["max_frames"], gamma=p["gamma"],
-                    invert=p["invert"],
+                    invert=p["invert"], key=p["key"], speed=p["speed"],
                 )
                 for frame in gen:
                     frames.append(frame)
@@ -508,7 +593,7 @@ class ConvertWorker(QThread):
             else:
                 frames = convert.image_frames(
                     p["path"], p["width"], p["style"], p["crop"],
-                    gamma=p["gamma"], invert=p["invert"],
+                    gamma=p["gamma"], invert=p["invert"], key=p["key"],
                 )
             if not frames:
                 raise convert.ConvertError("conversion produced no frames")
@@ -556,7 +641,8 @@ class RenderWorker(QThread):
                     time.sleep(0.001)  # let the UI breathe (GIL)
             else:
                 font = export.find_font(
-                    self.font_size, braille=meta.get("style") == "braille"
+                    self.font_size,
+                    braille=meta.get("style") in ("braille", "dots"),
                 )
                 cw = max(round(font.getlength("█")), 1)
                 ch = max(font.getbbox("█")[3], 1)
@@ -647,6 +733,7 @@ class ConvertTab(QWidget):
         super().__init__()
         self.path = None
         self.worker = None
+        self.loader = None
 
         open_btn = QPushButton("Open video or image…")
         open_btn.setObjectName("accent")
@@ -668,18 +755,43 @@ class ConvertTab(QWidget):
         self.style_box.addItems(convert.STYLES)
         self.style_box.setToolTip(
             "blocks: color pixels from characters\n"
+            "dots: dense colored dot-matrix, like a small OLED screen\n"
             "ascii / braille: text, tinted with your theme\n"
             "image: the real untouched pixels (kitty terminal)"
         )
         self.width_spin = QSpinBox(minimum=16, maximum=200, value=48)
         self.fps_spin = QSpinBox(minimum=1, maximum=60, value=15)
+        self.speed_spin = QDoubleSpinBox(
+            minimum=0.25, maximum=4.0, value=1.0, singleStep=0.25
+        )
+        self.speed_spin.setToolTip("2 = twice as fast, 0.5 = half speed")
         self.start_edit = QLineEdit(placeholderText="e.g. 12 or 0:30")
         self.dur_edit = QLineEdit(placeholderText="whole video")
         self.frames_spin = QSpinBox(minimum=1, maximum=2000, value=400)
         self.gamma_spin = QDoubleSpinBox(
             minimum=0.2, maximum=3.0, value=1.0, singleStep=0.1
         )
-        self.invert_check = QCheckBox("invert (ascii/braille)")
+        self.invert_check = QCheckBox("invert (ascii/braille/dots)")
+
+        # background keying: eyedrop a color, tune how far it reaches
+        self._bg_rgb = None
+        self.bg_swatch = QLabel(" none ")
+        self.bg_swatch.setAlignment(Qt.AlignCenter)
+        pick_bg = QPushButton("Pick…")
+        pick_bg.setObjectName("ghost")
+        pick_bg.setToolTip("then click the background color on the image")
+        pick_bg.clicked.connect(self.crop_view.start_picking)
+        clear_bg = QPushButton("✕")
+        clear_bg.setObjectName("ghost")
+        clear_bg.setFixedWidth(34)
+        clear_bg.clicked.connect(lambda: self.set_bg_color(None))
+        self.crop_view.color_picked.connect(self.set_bg_color)
+        self.tol_spin = QSpinBox(minimum=1, maximum=60, value=15)
+        self.tol_spin.setSuffix(" %")
+        bg_row = QHBoxLayout()
+        bg_row.addWidget(self.bg_swatch, 1)
+        bg_row.addWidget(pick_bg)
+        bg_row.addWidget(clear_bg)
 
         form_box = QGroupBox("Conversion")
         form = QFormLayout(form_box)
@@ -687,10 +799,13 @@ class ConvertTab(QWidget):
         form.addRow("style", self.style_box)
         form.addRow("width (cols)", self.width_spin)
         form.addRow("fps", self.fps_spin)
+        form.addRow("speed", self.speed_spin)
         form.addRow("start (s)", self.start_edit)
         form.addRow("duration (s)", self.dur_edit)
         form.addRow("max frames", self.frames_spin)
         form.addRow("gamma", self.gamma_spin)
+        form.addRow("remove bg", bg_row)
+        form.addRow("bg tolerance", self.tol_spin)
         form.addRow("", self.invert_check)
 
         self.preview_btn = QPushButton("Preview")
@@ -739,6 +854,20 @@ class ConvertTab(QWidget):
         meta = dict(meta, fps=30, style="ascii", mode="mono")
         self.anim_view.show_frames(meta, frames, font_size=11, limit=100)
 
+    def set_bg_color(self, rgb):
+        self._bg_rgb = tuple(rgb) if rgb else None
+        if self._bg_rgb:
+            r, g, b = self._bg_rgb
+            self.bg_swatch.setText(f"#{r:02x}{g:02x}{b:02x}")
+            self.bg_swatch.setStyleSheet(
+                f"background: rgb({r},{g},{b}); border-radius: 6px;"
+                f" color: {'#000' if r + g + b > 380 else '#fff'};"
+                " padding: 4px;"
+            )
+        else:
+            self.bg_swatch.setText(" none ")
+            self.bg_swatch.setStyleSheet("")
+
     def open_file(self):
         path = pick_open(self)
         if not path:
@@ -751,10 +880,18 @@ class ConvertTab(QWidget):
         self.path = path
         self.path_label.setText(os.path.basename(path))
         self.crop_view.set_image(frame)
+        self.set_bg_color(None)
         base = os.path.splitext(os.path.basename(path))[0]
         self.name_edit.setText(
             "".join(c if c.isalnum() or c in "-_" else "-" for c in base)
         )
+        # play the original in the crop view while options are tweaked
+        if self.loader:
+            self.loader.stopped = True
+        if os.path.splitext(path)[1].lower() in VIDEO_EXTS | {".gif"}:
+            self.loader = SourceLoader(path)
+            self.loader.frame_ready.connect(self.crop_view.add_play_frame)
+            self.loader.start()
 
     def params(self, preview):
         ext = os.path.splitext(self.path)[1].lower()
@@ -764,7 +901,10 @@ class ConvertTab(QWidget):
             "width": self.width_spin.value(),
             "style": self.style_box.currentText(),
             "fps": self.fps_spin.value(),
+            "speed": self.speed_spin.value(),
             "crop": self.crop_view.crop_dict(),
+            "key": (self._bg_rgb, self.tol_spin.value())
+            if self._bg_rgb else None,
             "start": self.start_edit.text().strip() or None,
             "duration": self.dur_edit.text().strip() or None,
             "max_frames": min(64, self.frames_spin.value())
@@ -1058,7 +1198,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.convert_tab.anim_view.shutdown()
         self.library_tab.anim_view.shutdown()
+        if self.convert_tab.loader:
+            self.convert_tab.loader.stopped = True
         for worker in (self.convert_tab.worker,
+                       self.convert_tab.loader,
                        self.library_tab._stock_worker):
             if worker and worker.isRunning():
                 worker.wait(8000)
