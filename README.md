@@ -13,6 +13,9 @@ right — and redraws the block in place. Any keypress (or Ctrl+C) stops it.
 ## Features
 
 - **Convert anything**: mp4/mkv/webm/mov videos, GIFs, or still images.
+- **GUI or CLI**: a Qt interface (`motionfetch gui`) where cropping is
+  dragging a box over the video and the preview plays live — or do it all
+  with flags from the terminal.
 - **Three looks**: truecolor pixel `blocks`, classic `ascii` ramp, or
   high-detail `braille` — ascii and braille are plain text, tinted with your
   theme's accent color at play time.
@@ -41,7 +44,25 @@ pipx install git+https://github.com/0980491/motionfetch
 
 (or `pip install --user git+…`, or clone and `pip install .`)
 
+For the GUI too, install the `gui` extra:
+
+```bash
+pipx install 'motionfetch[gui] @ git+https://github.com/0980491/motionfetch'
+```
+
 On Arch: `sudo pacman -S --needed ffmpeg python-pipx` first.
+
+## The GUI
+
+`motionfetch gui` (or `motionfetch-gui`) opens a Qt interface: open a video,
+**drag a box over the frame to crop** — no percentages, no video editor —
+tweak style/width/fps, watch the converted preview play live, and save.
+The Library tab plays everything you've made and creates the per-animation
+commands with a button.
+
+![the convert tab, cropping a watermark out of a video](screenshots/shot-convert.png)
+
+![the library tab](screenshots/shot-library.png)
 
 ## Quick start
 

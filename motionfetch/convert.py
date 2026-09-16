@@ -195,7 +195,11 @@ def video_frames(path, width, style, fps, crop, start=None, duration=None,
     cmd += ["-vf", filters, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
 
     frame_bytes = px_w * px_h * 3
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    # DEVNULL: stopping early (max_frames) breaks ffmpeg's pipe, which is
+    # expected and would otherwise spray harmless errors over the UI
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
     try:
         count = 0
         while count < max_frames:

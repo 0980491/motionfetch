@@ -22,8 +22,12 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/0980491/motionfetch"
 
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+
 [project.scripts]
 motionfetch = "motionfetch.cli:main"
+motionfetch-gui = "motionfetch.gui:main"
 
 [tool.setuptools]
 packages = ["motionfetch"]

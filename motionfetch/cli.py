@@ -2,13 +2,12 @@
 
 import argparse
 import os
-import stat
 import sys
 
 from rich.console import Console
 from rich.table import Table
 
-from . import __version__, convert, generators, library, player
+from . import __version__, convert, generators, library, links, player
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, style="bold red", highlight=False)
@@ -196,58 +195,27 @@ def cmd_fetch(args):
 
 
 def installed_links():
-    """-> {animation name: command name} for links created by us."""
-    links = {}
-    if not os.path.isdir(BIN_DIR):
-        return links
-    for fname in os.listdir(BIN_DIR):
-        path = os.path.join(BIN_DIR, fname)
-        try:
-            if not os.path.isfile(path) or os.path.getsize(path) > 4096:
-                continue
-            with open(path) as f:
-                text = f.read()
-        except OSError:
-            continue
-        if "# managed by motionfetch" in text:
-            for line in text.splitlines():
-                if line.startswith("# animation:"):
-                    links[line.split(":", 1)[1].strip()] = fname
-    return links
+    return links.installed()
 
 
 def cmd_link(args):
     meta, _ = load_or_die(args.name)
-    cmd_name = args.command or f"fastfetch-{meta['name']}"
-    os.makedirs(BIN_DIR, exist_ok=True)
-    path = os.path.join(BIN_DIR, cmd_name)
-    if os.path.exists(path) and not args.force:
-        with open(path) as f:
-            ours = "# managed by motionfetch" in f.read()
-        if not ours:
-            die(f"{path} exists and was not created by motionfetch")
-    action = "play" if args.play else "fetch"
-    with open(path, "w") as f:
-        f.write(
-            "#!/bin/sh\n"
-            "# managed by motionfetch\n"
-            f"# animation: {meta['name']}\n"
-            f'exec motionfetch {action} "{meta["name"]}" "$@"\n'
+    try:
+        path = links.create(
+            meta["name"], args.command, play=args.play, force=args.force
         )
-    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP)
-    console.print(f"[green]created[/] [bold]{cmd_name}[/] → {path}")
+    except links.LinkError as e:
+        die(e)
+    console.print(f"[green]created[/] [bold]{os.path.basename(path)}[/] → {path}")
     if BIN_DIR not in os.environ.get("PATH", "").split(":"):
         console.print(f"[yellow]note:[/] {BIN_DIR} is not in your PATH")
 
 
 def cmd_unlink(args):
-    path = os.path.join(BIN_DIR, args.command)
-    if not os.path.isfile(path):
-        die(f"no such command: {path}")
-    with open(path) as f:
-        if "# managed by motionfetch" not in f.read():
-            die(f"{path} was not created by motionfetch — not touching it")
-    os.remove(path)
+    try:
+        links.remove(args.command)
+    except links.LinkError as e:
+        die(e)
     console.print(f"removed [bold]{args.command}[/]")
 
 
@@ -425,7 +393,21 @@ def build_parser():
     inf.add_argument("name")
     inf.set_defaults(func=cmd_info)
 
+    gu = sub.add_parser("gui", help="open the graphical interface")
+    gu.set_defaults(func=cmd_gui)
+
     return p
+
+
+def cmd_gui(_args):
+    try:
+        from . import gui
+    except ImportError:
+        die(
+            "the GUI needs PySide6 — install with:\n"
+            "  pipx install 'motionfetch[gui]'   (or pip install PySide6)"
+        )
+    gui.main()
 
 
 def main(argv=None):
