@@ -168,6 +168,12 @@ motionfetch export donut hero.gif --fetch    # composed beside fastfetch
   the escapes stripped, and glues it to every frame up front — the loop itself
   does no work but printing.
 
+## Credits
+
+The "M" in the app icon and splash animation is the
+[Letter M Logo](https://logowik.com/letter-m-logo-vector-30824.html) from
+logowik.com, rendered as ASCII by motionfetch itself.
+
 ## License
 
 MIT

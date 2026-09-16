@@ -31,3 +31,6 @@ motionfetch-gui = "motionfetch.gui:main"
 
 [tool.setuptools]
 packages = ["motionfetch"]
+
+[tool.setuptools.package-data]
+motionfetch = ["assets/*.txt"]

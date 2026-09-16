@@ -87,16 +87,57 @@ def parse_line(line, base_fg):
     return cells
 
 
-def render_frame_image(frame, meta, font, cell_w, cell_h, tint=None):
-    pad, bar = 14, 28
+def _color_runs(cells):
+    """Group consecutive cells sharing fg/bg into (text, fg, bg, start)."""
+    runs = []
+    for i, (ch, fg, bg) in enumerate(cells):
+        if runs and runs[-1][1] == fg and runs[-1][2] == bg:
+            runs[-1][0].append(ch)
+        else:
+            runs.append([[ch], fg, bg, i])
+    return [("".join(chs), fg, bg, start) for chs, fg, bg, start in runs]
+
+
+def _blocks_pixels(frame, meta):
+    """A blocks frame is literally 2 pixels per cell — rebuild that tiny
+    image and let the caller scale it. Orders of magnitude faster than
+    drawing every '▀' as a glyph."""
+    cols, rows = meta["width"], meta["height"]
+    img = Image.new("RGB", (cols, rows * 2), BG)
+    px = img.load()
+    for y, line in enumerate(frame[:rows]):
+        for x, (ch, fg, bg) in enumerate(parse_line(line, FG)[:cols]):
+            if ch == "▀":
+                px[x, y * 2] = fg
+                px[x, y * 2 + 1] = bg or BG
+            elif bg:
+                px[x, y * 2] = bg
+                px[x, y * 2 + 1] = bg
+    return img
+
+
+def render_frame_image(frame, meta, font, cell_w, cell_h, tint=None,
+                       chrome=True):
+    pad, bar = 14, 28 if chrome else 0
     w = meta["width"] * cell_w + pad * 2
     h = meta["height"] * cell_h + pad * 2 + bar
     img = Image.new("RGB", (w, h), BG)
     draw = ImageDraw.Draw(img)
-    draw.rectangle((0, 0, w, bar), fill=CHROME)
-    for i, color in enumerate(DOTS):
-        cx = 16 + i * 20
-        draw.ellipse((cx - 6, bar // 2 - 6, cx + 6, bar // 2 + 6), fill=color)
+    if chrome:
+        draw.rectangle((0, 0, w, bar), fill=CHROME)
+        for i, color in enumerate(DOTS):
+            cx = 16 + i * 20
+            draw.ellipse(
+                (cx - 6, bar // 2 - 6, cx + 6, bar // 2 + 6), fill=color
+            )
+
+    if meta.get("style") == "blocks":
+        pixels = _blocks_pixels(frame, meta).resize(
+            (meta["width"] * cell_w, meta["height"] * cell_h),
+            Image.NEAREST,
+        )
+        img.paste(pixels, (pad, bar + pad))
+        return img
 
     base_fg = FG
     if meta.get("mode") == "mono":
@@ -105,12 +146,14 @@ def render_frame_image(frame, meta, font, cell_w, cell_h, tint=None):
 
     for row, line in enumerate(frame):
         y = bar + pad + row * cell_h
-        for col, (ch, fg, bg) in enumerate(parse_line(line, base_fg)):
-            x = pad + col * cell_w
+        for text, fg, bg, start in _color_runs(parse_line(line, base_fg)):
+            x = pad + start * cell_w
             if bg:
-                draw.rectangle((x, y, x + cell_w, y + cell_h), fill=bg)
-            if ch not in (" ", ""):
-                draw.text((x, y), ch, font=font, fill=fg)
+                draw.rectangle(
+                    (x, y, x + len(text) * cell_w, y + cell_h), fill=bg
+                )
+            if text.strip():
+                draw.text((x, y), text, font=font, fill=fg)
     return img
 
 
@@ -136,9 +179,10 @@ def render_pixel_frame(png_bytes, meta, cell_w, cell_h):
 def export(meta, frames, out_path, fps=None, font_size=15, tint=None,
            max_frames=None):
     font = find_font(font_size, braille=meta.get("style") == "braille")
-    box = font.getbbox("█")
-    cell_w = max(box[2] - box[0], 1)
-    cell_h = max(box[3], 1)
+    # advance width, not ink width: text is drawn a whole run at a time,
+    # so the per-cell step must match the font's own character advance
+    cell_w = max(round(font.getlength("█")), 1)
+    cell_h = max(font.getbbox("█")[3], 1)
     if max_frames:
         frames = frames[:max_frames]
     if os.path.splitext(out_path)[1].lower() == ".png":

@@ -10,9 +10,11 @@ around, and a desktop menu entry that installs itself on first launch.
 
 import io
 import os
+import random
 import shutil
 import subprocess
 import sys
+import time
 
 from PIL import Image, ImageDraw
 from PySide6.QtCore import (
@@ -54,10 +56,8 @@ PALETTES = {
 
 QSS = """
 QWidget {{ font-size: 13px; }}
-QTabWidget::pane {{
-    border: 1px solid {surface}; border-radius: 10px;
-    background: {base}; top: -1px;
-}}
+QTabWidget::pane {{ border: none; background: {base}; }}
+QTabBar {{ qproperty-drawBase: 0; }}
 QTabBar::tab {{
     background: transparent; color: {sub};
     padding: 8px 20px; border: none; margin-right: 4px;
@@ -193,17 +193,53 @@ def pick_save(parent, suggested):
 # ── desktop menu entry ──
 
 
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.txt")
+
+
+def logo_art():
+    """The app's ASCII "M" (see the logo credit in the README)."""
+    try:
+        with open(LOGO_PATH) as f:
+            return f.read().rstrip("\n").split("\n")
+    except OSError:
+        return generators.donut(40, 21, 1)[0]
+
+
+def logo_reveal_frames(frames=48, hold=24, seed=3):
+    """The logo drawing itself: cells appear in a diagonal sweep with a
+    dithered frontier, then the finished M holds for a moment."""
+    art = logo_art()
+    h, w = len(art), max(len(line) for line in art)
+    rng = random.Random(seed)
+    jitter = [[rng.uniform(0, 14) for _ in range(w)] for _ in range(h)]
+    out = []
+    for step in range(frames):
+        t = (step + 1) / frames * (w + h + 14)
+        lines = []
+        for y, line in enumerate(art):
+            row = []
+            for x in range(w):
+                ch = line[x] if x < len(line) else " "
+                row.append(ch if x + y + jitter[y][x] < t else " ")
+            lines.append("".join(row))
+        out.append(lines)
+    out.extend([list(art)] * hold)
+    return out, w, h
+
+
 def _make_icon(path):
-    frame = generators.donut(30, 15, 1)[0]
+    art = logo_art()
+    rows, cols = len(art), max(len(line) for line in art)
     img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle((8, 8, 248, 248), radius=52, fill=(30, 30, 46, 255))
-    font = export.find_font(14)
-    for y, line in enumerate(frame):
+    font = export.find_font(13)
+    step_x, step_y = 212 / cols, 200 / rows
+    for y, line in enumerate(art):
         for x, ch in enumerate(line):
             if ch != " ":
                 draw.text(
-                    (24 + x * 7.0, 42 + y * 12.0), ch,
+                    (24 + x * step_x, 30 + y * step_y), ch,
                     font=font, fill=(137, 180, 250, 255),
                 )
     img.save(path)
@@ -217,8 +253,7 @@ def ensure_desktop_entry():
         os.makedirs(apps, exist_ok=True)
         os.makedirs(icons, exist_ok=True)
         icon_path = os.path.join(icons, "motionfetch.png")
-        if not os.path.exists(icon_path):
-            _make_icon(icon_path)
+        _make_icon(icon_path)  # cheap; keeps the icon current across updates
 
         exe = shutil.which("motionfetch-gui")
         if exe:
@@ -504,6 +539,7 @@ class ConvertWorker(QThread):
                 for frame in gen:
                     frames.append(frame)
                     self.progress.emit(len(frames))
+                    time.sleep(0.002)  # keep the UI responsive (GIL)
             else:
                 frames = convert.image_frames(
                     p["path"], p["width"], p["style"], p["crop"],
@@ -517,9 +553,67 @@ class ConvertWorker(QThread):
             self.failed.emit(str(e))
 
 
+class RenderWorker(QThread):
+    """Renders preview frames to QImages off the UI thread — drawing a few
+    dozen frames glyph by glyph is exactly the kind of work that used to
+    freeze the window. QImage is thread-safe to build; only the QPixmap
+    conversion happens back on the UI side."""
+
+    frame_ready = Signal(int, QImage)
+
+    def __init__(self, token, meta, frames, tint, font_size):
+        super().__init__()
+        self.token = token
+        self.meta = meta
+        self.frames = frames
+        self.tint = tint
+        self.font_size = font_size
+
+    def run(self):
+        meta = self.meta
+        try:
+            if meta.get("mode") == "image":
+                for f in self.frames:
+                    qimg = QImage()
+                    if isinstance(f, (bytes, bytearray)):
+                        qimg.loadFromData(bytes(f))
+                    else:
+                        rgb = f.convert("RGB")
+                        qimg = QImage(
+                            rgb.tobytes(), rgb.width, rgb.height,
+                            rgb.width * 3, QImage.Format_RGB888,
+                        ).copy()
+                    self.frame_ready.emit(
+                        self.token,
+                        qimg.scaled(560, 380, Qt.KeepAspectRatio,
+                                    Qt.SmoothTransformation),
+                    )
+                    time.sleep(0.001)  # let the UI breathe (GIL)
+            else:
+                font = export.find_font(
+                    self.font_size, braille=meta.get("style") == "braille"
+                )
+                cw = max(round(font.getlength("█")), 1)
+                ch = max(font.getbbox("█")[3], 1)
+                for f in self.frames:
+                    pil = export.render_frame_image(
+                        f, meta, font, cw, ch, self.tint, chrome=False
+                    ).convert("RGB")
+                    self.frame_ready.emit(
+                        self.token,
+                        QImage(
+                            pil.tobytes(), pil.width, pil.height,
+                            pil.width * 3, QImage.Format_RGB888,
+                        ).copy(),
+                    )
+                    time.sleep(0.001)
+        except Exception:
+            pass  # a broken preview should never take the window down
+
+
 class AnimationView(QLabel):
-    """Plays a converted animation, rendered with the export engine (text
-    styles) or straight from the pixels (image style)."""
+    """Plays a converted animation. Rendering happens in a worker thread;
+    while it runs the label just says so instead of blocking the window."""
 
     def __init__(self):
         super().__init__()
@@ -527,45 +621,52 @@ class AnimationView(QLabel):
         self.setMinimumHeight(240)
         self._pixmaps = []
         self._i = 0
+        self._fps = 15
+        self._token = 0
+        self._workers = []
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
-    def show_frames(self, meta, frames, tint=None, font_size=12, limit=64):
-        frames = frames[:limit]
-        if meta.get("mode") == "image":
-            pixmaps = []
-            for f in frames:
-                if isinstance(f, (bytes, bytearray)):
-                    pm = QPixmap()
-                    pm.loadFromData(bytes(f))
-                else:
-                    pm = pil_to_pixmap(f)
-                pixmaps.append(
-                    pm.scaled(560, 380, Qt.KeepAspectRatio,
-                              Qt.SmoothTransformation)
-                )
-            self._pixmaps = pixmaps
-        else:
-            font = export.find_font(
-                font_size, braille=meta.get("style") == "braille"
-            )
-            box = font.getbbox("█")
-            cw, ch = max(box[2] - box[0], 1), max(box[3], 1)
-            self._pixmaps = [
-                pil_to_pixmap(
-                    export.render_frame_image(f, meta, font, cw, ch, tint)
-                )
-                for f in frames
-            ]
-        self._i = 0
-        if self._pixmaps:
+    def show_frames(self, meta, frames, tint=None, font_size=12, limit=48):
+        self._token += 1
+        self._timer.stop()
+        self._pixmaps = []
+        self._fps = max(meta.get("fps", 15), 1)
+        self.setText("rendering preview…")
+        worker = RenderWorker(
+            self._token, meta, frames[:limit], tint, font_size
+        )
+        worker.frame_ready.connect(self._on_frame)
+        worker.finished.connect(
+            lambda w=worker: self._workers.remove(w)
+            if w in self._workers else None
+        )
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_frame(self, token, image):
+        # frames stream in as they render; the loop starts on the first one
+        if token != self._token:
+            return
+        self._pixmaps.append(QPixmap.fromImage(image))
+        if len(self._pixmaps) == 1:
+            self._i = 0
             self.setPixmap(self._pixmaps[0])
-            self._timer.start(int(1000 / max(meta.get("fps", 15), 1)))
+            self._timer.start(int(1000 / self._fps))
 
     def stop(self):
+        self._token += 1
         self._timer.stop()
         self._pixmaps = []
         self.clear()
+
+    def shutdown(self):
+        """Block until render workers finish (called on window close —
+        destroying a QThread mid-run aborts the process)."""
+        self._token += 1
+        self._timer.stop()
+        for worker in list(self._workers):
+            worker.wait(3000)
 
     def _tick(self):
         if not self._pixmaps:
@@ -661,6 +762,15 @@ class ConvertTab(QWidget):
         lay.setSpacing(14)
         lay.addLayout(left, 3)
         lay.addLayout(right, 2)
+
+        self.show_logo_intro()
+
+    def show_logo_intro(self):
+        """The M drawing itself in ascii, until a real preview replaces it."""
+        frames, w, h = logo_reveal_frames()
+        meta = {"mode": "mono", "style": "ascii", "fps": 30,
+                "width": w, "height": h}
+        self.anim_view.show_frames(meta, frames, font_size=11, limit=100)
 
     def open_file(self):
         path = pick_open(self)
@@ -958,6 +1068,14 @@ class MainWindow(QMainWindow):
     def on_saved(self, name):
         self.library_tab.refresh(select=name)
         self.tabs.setCurrentWidget(self.library_tab)
+
+    def closeEvent(self, event):
+        self.convert_tab.anim_view.shutdown()
+        self.library_tab.anim_view.shutdown()
+        worker = self.convert_tab.worker
+        if worker and worker.isRunning():
+            worker.wait(5000)
+        event.accept()
 
 
 def main():
