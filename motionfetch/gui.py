@@ -17,7 +17,8 @@ import time
 
 from PIL import Image, ImageDraw
 from PySide6.QtCore import (
-    QPoint, QRect, QSettings, QSize, Qt, QThread, QTimer, Signal,
+    QEventLoop, QPoint, QProcess, QRect, QSettings, QSize, Qt, QThread,
+    QTimer, Signal,
 )
 from PySide6.QtGui import (
     QColor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap,
@@ -149,15 +150,33 @@ def apply_theme(app, name):
 # ── KDE-friendly file dialogs ──
 
 
+_kdialog_open = False
+
+
 def _kdialog(argv):
-    """Run kdialog; '' means cancelled, None means kdialog unusable."""
-    try:
-        r = subprocess.run(
-            ["kdialog", *argv], capture_output=True, text=True, timeout=600
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    """Run kdialog; '' means cancelled, None means kdialog unusable.
+
+    Runs through QProcess with a local event loop, NOT subprocess.run:
+    blocking the Qt event loop while the dialog sits open makes the
+    compositor flag the app as not responding."""
+    global _kdialog_open
+    if _kdialog_open:
+        return ""
+    proc = QProcess()
+    loop = QEventLoop()
+    proc.finished.connect(loop.quit)
+    proc.errorOccurred.connect(loop.quit)
+    proc.start("kdialog", list(argv))
+    if not proc.waitForStarted(3000):
         return None
-    return r.stdout.strip() if r.returncode == 0 else ""
+    _kdialog_open = True
+    try:
+        loop.exec()
+    finally:
+        _kdialog_open = False
+    if proc.exitCode() != 0 or proc.exitStatus() != QProcess.NormalExit:
+        return ""
+    return bytes(proc.readAllStandardOutput()).decode().strip()
 
 
 def pick_open(parent):
@@ -488,7 +507,10 @@ class CropView(QWidget):
         p.drawRoundedRect(self.rect(), 10, 10)
         if not self._pix:
             p.setPen(QColor(140, 140, 160))
-            p.drawText(self.rect(), Qt.AlignCenter, "open a video or image")
+            p.drawText(
+                self.rect(), Qt.AlignCenter,
+                "open a video or image — or drop one here",
+            )
             return
         scale, ox, oy = self._view()
         target = QRect(
@@ -574,6 +596,7 @@ class ConvertWorker(QThread):
     def __init__(self, params):
         super().__init__()
         self.p = params
+        self.stopped = False
 
     def run(self):
         p = self.p
@@ -587,6 +610,8 @@ class ConvertWorker(QThread):
                     invert=p["invert"], key=p["key"], speed=p["speed"],
                 )
                 for frame in gen:
+                    if self.stopped:
+                        return
                     frames.append(frame)
                     self.progress.emit(len(frames))
                     time.sleep(0.002)  # keep the UI responsive (GIL)
@@ -618,12 +643,15 @@ class RenderWorker(QThread):
         self.frames = frames
         self.tint = tint
         self.font_size = font_size
+        self.stopped = False
 
     def run(self):
         meta = self.meta
         try:
             if meta.get("mode") == "image":
                 for f in self.frames:
+                    if self.stopped:
+                        return
                     qimg = QImage()
                     if isinstance(f, (bytes, bytearray)):
                         qimg.loadFromData(bytes(f))
@@ -647,6 +675,8 @@ class RenderWorker(QThread):
                 cw = max(round(font.getlength("█")), 1)
                 ch = max(font.getbbox("█")[3], 1)
                 for f in self.frames:
+                    if self.stopped:
+                        return
                     pil = export.render_frame_image(
                         f, meta, font, cw, ch, self.tint, chrome=False
                     ).convert("RGB")
@@ -684,14 +714,16 @@ class AnimationView(QLabel):
         self._pixmaps = []
         self._fps = max(meta.get("fps", 15), 1)
         self.setText("rendering preview…")
+        # superseded workers would otherwise keep rendering frames nobody
+        # will show; prune the finished ones here rather than from their own
+        # finished signal, where the C++ side may still be winding down
+        for old in self._workers:
+            old.stopped = True
+        self._workers = [w for w in self._workers if not w.isFinished()]
         worker = RenderWorker(
             self._token, meta, frames[:limit], tint, font_size
         )
         worker.frame_ready.connect(self._on_frame)
-        worker.finished.connect(
-            lambda w=worker: self._workers.remove(w)
-            if w in self._workers else None
-        )
         self._workers.append(worker)
         worker.start()
 
@@ -709,15 +741,18 @@ class AnimationView(QLabel):
         self._token += 1
         self._timer.stop()
         self._pixmaps = []
+        for worker in self._workers:
+            worker.stopped = True
         self.clear()
 
     def shutdown(self):
-        """Block until render workers finish (called on window close —
-        destroying a QThread mid-run aborts the process)."""
+        """Ask render workers to stop and block until they do (called on
+        window close — destroying a QThread mid-run aborts the process)."""
         self._token += 1
         self._timer.stop()
         for worker in list(self._workers):
-            worker.wait(3000)
+            worker.stopped = True
+            worker.wait(5000)
 
     def _tick(self):
         if not self._pixmaps:
@@ -772,6 +807,10 @@ class ConvertTab(QWidget):
             minimum=0.2, maximum=3.0, value=1.0, singleStep=0.1
         )
         self.invert_check = QCheckBox("invert (ascii/braille/dots)")
+        # line edits accept drops by default and would paste the path as
+        # text; let every drop reach the window's handler instead
+        for edit in (self.name_edit, self.start_edit, self.dur_edit):
+            edit.setAcceptDrops(False)
 
         # background keying: eyedrop a color, tune how far it reaches
         self._bg_rgb = None
@@ -870,8 +909,11 @@ class ConvertTab(QWidget):
 
     def open_file(self):
         path = pick_open(self)
-        if not path:
-            return
+        if path:
+            self.load_path(path)
+
+    def load_path(self, path):
+        """Open a source file — from the dialog or a drag-and-drop."""
         try:
             frame = grab_source_frame(path)
         except Exception as e:
@@ -1155,6 +1197,9 @@ class LibraryTab(QWidget):
         self.refresh()
 
 
+DROP_EXTS = VIDEO_EXTS | {".gif", ".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
 class MainWindow(QMainWindow):
     def __init__(self, app, settings):
         super().__init__()
@@ -1162,6 +1207,7 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.setWindowTitle("motionfetch")
         self.resize(1100, 660)
+        self.setAcceptDrops(True)
 
         tabs = QTabWidget()
         self.convert_tab = ConvertTab()
@@ -1195,15 +1241,34 @@ class MainWindow(QMainWindow):
         self.library_tab.refresh(select=name)
         self.tabs.setCurrentWidget(self.library_tab)
 
+    # drag a video or image in from the file manager
+    def _dropped_path(self, mime):
+        for url in mime.urls():
+            if url.isLocalFile():
+                path = url.toLocalFile()
+                if os.path.splitext(path)[1].lower() in DROP_EXTS:
+                    return path
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dropped_path(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        path = self._dropped_path(event.mimeData())
+        if path:
+            event.acceptProposedAction()
+            self.tabs.setCurrentWidget(self.convert_tab)
+            self.convert_tab.load_path(path)
+
     def closeEvent(self, event):
         self.convert_tab.anim_view.shutdown()
         self.library_tab.anim_view.shutdown()
-        if self.convert_tab.loader:
-            self.convert_tab.loader.stopped = True
         for worker in (self.convert_tab.worker,
                        self.convert_tab.loader,
                        self.library_tab._stock_worker):
             if worker and worker.isRunning():
+                worker.stopped = True
                 worker.wait(8000)
         event.accept()
 

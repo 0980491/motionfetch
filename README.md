@@ -59,10 +59,11 @@ On Arch: `sudo pacman -S --needed ffmpeg python-pipx` first.
 
 ## The GUI
 
-`motionfetch gui` (or `motionfetch-gui`) opens a Qt interface: open a video
-(**it plays right there** while you set things up), **drag a box over the
-frame to crop**, **click the background color to key it out**, tweak
-style/width/fps/speed, watch the converted preview play live, and save.
+`motionfetch gui` (or `motionfetch-gui`) opens a Qt interface: open a video —
+or **drag one in from your file manager** — (**it plays right there** while
+you set things up), **drag a box over the frame to crop**, **click the
+background color to key it out**, tweak style/width/fps/speed, watch the
+converted preview play live, and save.
 The Library tab plays everything you've made, creates the per-animation
 commands, copies the command to the clipboard, exports, deletes.
 
