@@ -5,7 +5,9 @@ draw the block, walk the cursor back up, draw the next frame.
 Any keypress or Ctrl+C stops the loop and restores the terminal.
 """
 
+import base64
 import os
+import random
 import select
 import shutil
 import subprocess
@@ -118,6 +120,95 @@ def run_loop(blocks, height, fps, secs=None, clear=True):
     except KeyboardInterrupt:
         pass
     finally:
+        out.write(RESET + ansi.SHOW_CURSOR)
+        out.flush()
+
+
+def kitty_graphics_supported():
+    term = os.environ.get("TERM", "")
+    return "KITTY_WINDOW_ID" in os.environ or "kitty" in term or \
+        "ghostty" in term
+
+
+def _kitty_cmd(out, ctrl, payload=""):
+    out.write(f"\x1b_G{ctrl}{';' + payload if payload else ';'}\x1b\\")
+
+
+def run_kitty_loop(png_frames, cols, rows, fps, info_lines=None, gap=3,
+                   secs=None, clear=True, once=False):
+    """Play "image" style animations: real pixels via the kitty graphics
+    protocol. Frames are transmitted once, then each tick just swaps which
+    one is placed — the same draw/walk-up dance as text, but for pixels."""
+    out = sys.stdout
+    if not out.isatty():
+        return
+    if not kitty_graphics_supported():
+        raise RuntimeError(
+            "the 'image' style needs a terminal with the kitty graphics "
+            "protocol (kitty, ghostty) — or re-convert with --style blocks"
+        )
+    info_lines = info_lines or []
+    height = max(rows, len(info_lines))
+    off = (height - len(info_lines)) // 2
+    delay = 1 / max(fps, 1)
+    limit = int(secs * fps) if secs else 0
+    if once:
+        png_frames = png_frames[:1]
+    base = random.randrange(1, (1 << 24) - len(png_frames))
+    ids = [base + k for k in range(len(png_frames))]
+
+    if clear:
+        out.write(ansi.CLEAR_SCREEN)
+    out.write(ansi.HIDE_CURSOR)
+    try:
+        # transmit every frame up front, in 4 KiB base64 chunks
+        for k, data in enumerate(png_frames):
+            b64 = base64.standard_b64encode(data).decode()
+            first = True
+            while b64:
+                chunk, b64 = b64[:4096], b64[4096:]
+                more = 1 if b64 else 0
+                ctrl = (
+                    f"a=t,f=100,i={ids[k]},m={more},q=2"
+                    if first else f"m={more},q=2"
+                )
+                _kitty_cmd(out, ctrl, chunk)
+                first = False
+
+        # the text half of the block: blank cells where the image will sit
+        for i in range(height):
+            j = i - off
+            info = info_lines[j] if 0 <= j < len(info_lines) else ""
+            out.write(" " * cols + " " * gap + info + CLEAR_EOL + "\n")
+        out.write(cursor_up(height))  # anchor: top-left of the image area
+
+        if once:
+            # place one frame and leave it on screen (scripting/static use)
+            _kitty_cmd(out, f"a=p,i={ids[0]},p=1,c={cols},r={rows},C=1,q=2")
+            ids = []  # keep the placement alive after exit
+            return
+        with _RawStdin() as stdin:
+            n, prev = 0, None
+            while True:
+                cur = ids[n % len(ids)]
+                _kitty_cmd(
+                    out, f"a=p,i={cur},p=1,c={cols},r={rows},C=1,q=2"
+                )
+                if prev is not None and prev != cur:
+                    _kitty_cmd(out, f"a=d,d=i,i={prev},q=2")
+                prev = cur
+                out.flush()
+                if limit and n >= limit - 1:
+                    break
+                if stdin.key_pressed(delay):
+                    break
+                n += 1
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for i in set(ids):
+            _kitty_cmd(out, f"a=d,d=I,i={i},q=2")
+        out.write(f"\x1b[{height}B\n" if height else "\n")
         out.write(RESET + ansi.SHOW_CURSOR)
         out.flush()
 

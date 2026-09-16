@@ -3,16 +3,24 @@ then manage the library (play, link commands, export, delete).
 
 Needs PySide6 (`pipx install 'motionfetch[gui]'`). Everything the GUI does
 goes through the same modules as the CLI, so both stay in sync.
+
+Niceties: dark/light theme (persisted), KDE file dialogs when kdialog is
+around, and a desktop menu entry that installs itself on first launch.
 """
 
 import io
 import os
+import shutil
 import subprocess
 import sys
 
-from PIL import Image
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PIL import Image, ImageDraw
+from PySide6.QtCore import (
+    QPoint, QRect, QSettings, QSize, Qt, QThread, QTimer, Signal,
+)
+from PySide6.QtGui import (
+    QColor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
@@ -23,6 +31,227 @@ from PySide6.QtWidgets import (
 from . import convert, export, generators, library, links, player
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
+
+FILE_FILTER = (
+    "Videos and images (*.mp4 *.mkv *.webm *.mov *.avi *.m4v "
+    "*.gif *.png *.jpg *.jpeg *.webp)"
+)
+
+# ── theming ──
+
+PALETTES = {
+    "dark": dict(
+        base="#1e1e2e", mantle="#181825", surface="#313244",
+        surface2="#45475a", text="#cdd6f4", sub="#a6adc8",
+        accent="#89b4fa", on_accent="#11111b",
+    ),
+    "light": dict(
+        base="#eff1f5", mantle="#e6e9ef", surface="#ccd0da",
+        surface2="#bcc0cc", text="#4c4f69", sub="#6c6f85",
+        accent="#1e66f5", on_accent="#ffffff",
+    ),
+}
+
+QSS = """
+QWidget {{ font-size: 13px; }}
+QTabWidget::pane {{
+    border: 1px solid {surface}; border-radius: 10px;
+    background: {base}; top: -1px;
+}}
+QTabBar::tab {{
+    background: transparent; color: {sub};
+    padding: 8px 20px; border: none; margin-right: 4px;
+}}
+QTabBar::tab:selected {{
+    color: {accent}; border-bottom: 2px solid {accent}; font-weight: 600;
+}}
+QPushButton {{
+    background: {surface}; border: none; border-radius: 8px;
+    padding: 8px 16px;
+}}
+QPushButton:hover {{ background: {surface2}; }}
+QPushButton:disabled {{ color: {sub}; }}
+QPushButton#accent {{
+    background: {accent}; color: {on_accent}; font-weight: 600;
+}}
+QPushButton#accent:hover {{ background: {accent}; }}
+QPushButton#ghost {{
+    background: transparent; border: 1px solid {surface2};
+}}
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+    background: {mantle}; border: 1px solid {surface};
+    border-radius: 8px; padding: 6px 10px;
+    selection-background-color: {accent};
+    selection-color: {on_accent};
+}}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+    border: 1px solid {accent};
+}}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{
+    background: {mantle}; border: 1px solid {surface};
+    selection-background-color: {surface};
+}}
+QGroupBox {{
+    border: 1px solid {surface}; border-radius: 10px;
+    margin-top: 12px; padding: 10px 4px 4px 4px; color: {sub};
+}}
+QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px; }}
+QListWidget {{
+    background: {mantle}; border: 1px solid {surface};
+    border-radius: 10px; padding: 6px; outline: none;
+}}
+QListWidget::item {{ padding: 8px; border-radius: 6px; color: {text}; }}
+QListWidget::item:hover {{ background: {surface}; }}
+QListWidget::item:selected {{ background: {surface}; color: {accent}; }}
+QProgressBar {{
+    background: {mantle}; border: none; border-radius: 5px;
+    max-height: 10px; text-align: center; color: transparent;
+}}
+QProgressBar::chunk {{ background: {accent}; border-radius: 5px; }}
+QCheckBox::indicator {{
+    width: 16px; height: 16px; border-radius: 4px;
+    border: 1px solid {surface2}; background: {mantle};
+}}
+QCheckBox::indicator:checked {{ background: {accent}; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; }}
+QScrollBar::handle:vertical {{
+    background: {surface2}; border-radius: 5px; min-height: 30px;
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+"""
+
+
+def apply_theme(app, name):
+    p = PALETTES[name]
+    pal = QPalette()
+    roles = {
+        QPalette.Window: "base",
+        QPalette.WindowText: "text",
+        QPalette.Base: "mantle",
+        QPalette.AlternateBase: "surface",
+        QPalette.Text: "text",
+        QPalette.Button: "surface",
+        QPalette.ButtonText: "text",
+        QPalette.Highlight: "accent",
+        QPalette.HighlightedText: "on_accent",
+        QPalette.ToolTipBase: "mantle",
+        QPalette.ToolTipText: "text",
+        QPalette.PlaceholderText: "sub",
+    }
+    for role, key in roles.items():
+        pal.setColor(role, QColor(p[key]))
+    for role in (QPalette.Text, QPalette.ButtonText, QPalette.WindowText):
+        pal.setColor(QPalette.Disabled, role, QColor(p["sub"]))
+    app.setPalette(pal)
+    app.setStyleSheet(QSS.format(**p))
+
+
+# ── KDE-friendly file dialogs ──
+
+
+def _kdialog(argv):
+    """Run kdialog; '' means cancelled, None means kdialog unusable."""
+    try:
+        r = subprocess.run(
+            ["kdialog", *argv], capture_output=True, text=True, timeout=600
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def pick_open(parent):
+    if shutil.which("kdialog"):
+        res = _kdialog(
+            ["--title", "Open video or image",
+             "--getopenfilename", os.path.expanduser("~"), FILE_FILTER]
+        )
+        if res is not None:
+            return res or None
+    path, _ = QFileDialog.getOpenFileName(
+        parent, "Open video or image", os.path.expanduser("~"),
+        FILE_FILTER + ";;All files (*)",
+    )
+    return path or None
+
+
+def pick_save(parent, suggested):
+    if shutil.which("kdialog"):
+        res = _kdialog(
+            ["--title", "Export", "--getsavefilename", suggested,
+             "GIF or PNG (*.gif *.png)"]
+        )
+        if res is not None:
+            return res or None
+    path, _ = QFileDialog.getSaveFileName(
+        parent, "Export", suggested, "GIF (*.gif);;PNG (*.png)"
+    )
+    return path or None
+
+
+# ── desktop menu entry ──
+
+
+def _make_icon(path):
+    frame = generators.donut(30, 15, 1)[0]
+    img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((8, 8, 248, 248), radius=52, fill=(30, 30, 46, 255))
+    font = export.find_font(14)
+    for y, line in enumerate(frame):
+        for x, ch in enumerate(line):
+            if ch != " ":
+                draw.text(
+                    (24 + x * 7.0, 42 + y * 12.0), ch,
+                    font=font, fill=(137, 180, 250, 255),
+                )
+    img.save(path)
+
+
+def ensure_desktop_entry():
+    """Install a menu launcher (and icon) on first run; refresh if stale."""
+    try:
+        apps = os.path.expanduser("~/.local/share/applications")
+        icons = os.path.expanduser("~/.local/share/icons/hicolor/256x256/apps")
+        os.makedirs(apps, exist_ok=True)
+        os.makedirs(icons, exist_ok=True)
+        icon_path = os.path.join(icons, "motionfetch.png")
+        if not os.path.exists(icon_path):
+            _make_icon(icon_path)
+
+        exe = shutil.which("motionfetch-gui")
+        if exe:
+            exec_line = exe
+        else:
+            exe = shutil.which("motionfetch")
+            exec_line = f"{exe} gui" if exe else \
+                f"{sys.executable} -m motionfetch gui"
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=motionfetch\n"
+            "Comment=Turn videos and images into terminal animations\n"
+            f"Exec={exec_line}\n"
+            f"Icon={icon_path}\n"
+            "Terminal=false\n"
+            "Categories=AudioVideo;Graphics;Utility;\n"
+        )
+        entry = os.path.join(apps, "motionfetch.desktop")
+        try:
+            with open(entry) as f:
+                if f.read() == content:
+                    return icon_path
+        except OSError:
+            pass
+        with open(entry, "w") as f:
+            f.write(content)
+        return icon_path
+    except OSError:
+        return None
+
+
+# ── shared helpers ──
 
 
 def pil_to_pixmap(img):
@@ -47,6 +276,28 @@ def grab_source_frame(path):
                 return Image.open(io.BytesIO(out)).convert("RGB")
         raise convert.ConvertError(f"could not read a frame from {path!r}")
     return Image.open(path).convert("RGB")
+
+
+def build_meta(frames, params):
+    style = params["style"]
+    if style == "image":
+        first = frames[0]
+        return {
+            "mode": "image", "style": style, "fps": params["fps"],
+            "width": params["width"],
+            "height": max(
+                1, round(params["width"] * first.height / first.width * 0.5)
+            ),
+            "source": os.path.basename(params["path"]),
+        }
+    return {
+        "mode": "color" if style in ("blocks", "ascii-color") else "mono",
+        "style": style,
+        "fps": params["fps"],
+        "width": params["width"],
+        "height": len(frames[0]),
+        "source": os.path.basename(params["path"]),
+    }
 
 
 class CropView(QWidget):
@@ -191,7 +442,10 @@ class CropView(QWidget):
 
     def paintEvent(self, _ev):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(24, 24, 34))
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(17, 17, 27))
+        p.drawRoundedRect(self.rect(), 10, 10)
         if not self._pix:
             p.setPen(QColor(140, 140, 160))
             p.drawText(self.rect(), Qt.AlignCenter, "open a video or image")
@@ -204,8 +458,9 @@ class CropView(QWidget):
         p.drawPixmap(target, self._pix)
         if self._rect is not None:
             wr = self._to_widget(self._rect)
-            p.setClipRegion(self.rect())
             shade = QColor(0, 0, 0, 140)
+            p.setPen(Qt.NoPen)
+            p.setBrush(shade)
             for outside in (
                 QRect(target.left(), target.top(), target.width(),
                       wr.top() - target.top()),
@@ -216,9 +471,9 @@ class CropView(QWidget):
                 QRect(wr.right(), wr.top(), target.right() - wr.right(),
                       wr.height()),
             ):
-                p.fillRect(outside, shade)
-            pen = QPen(QColor(137, 180, 250), 2)
-            p.setPen(pen)
+                p.drawRect(outside)
+            p.setPen(QPen(QColor(137, 180, 250), 2))
+            p.setBrush(Qt.NoBrush)
             p.drawRect(wr)
             p.setBrush(QColor(137, 180, 250))
             for pt in (wr.topLeft(), wr.topRight(), wr.bottomLeft(),
@@ -263,7 +518,8 @@ class ConvertWorker(QThread):
 
 
 class AnimationView(QLabel):
-    """Plays a converted animation, rendered with the export engine."""
+    """Plays a converted animation, rendered with the export engine (text
+    styles) or straight from the pixels (image style)."""
 
     def __init__(self):
         super().__init__()
@@ -275,15 +531,32 @@ class AnimationView(QLabel):
         self._timer.timeout.connect(self._tick)
 
     def show_frames(self, meta, frames, tint=None, font_size=12, limit=64):
-        font = export.find_font(font_size)
-        box = font.getbbox("█")
-        cw, ch = max(box[2] - box[0], 1), max(box[3], 1)
-        self._pixmaps = [
-            pil_to_pixmap(
-                export.render_frame_image(f, meta, font, cw, ch, tint)
+        frames = frames[:limit]
+        if meta.get("mode") == "image":
+            pixmaps = []
+            for f in frames:
+                if isinstance(f, (bytes, bytearray)):
+                    pm = QPixmap()
+                    pm.loadFromData(bytes(f))
+                else:
+                    pm = pil_to_pixmap(f)
+                pixmaps.append(
+                    pm.scaled(560, 380, Qt.KeepAspectRatio,
+                              Qt.SmoothTransformation)
+                )
+            self._pixmaps = pixmaps
+        else:
+            font = export.find_font(
+                font_size, braille=meta.get("style") == "braille"
             )
-            for f in frames[:limit]
-        ]
+            box = font.getbbox("█")
+            cw, ch = max(box[2] - box[0], 1), max(box[3], 1)
+            self._pixmaps = [
+                pil_to_pixmap(
+                    export.render_frame_image(f, meta, font, cw, ch, tint)
+                )
+                for f in frames
+            ]
         self._i = 0
         if self._pixmaps:
             self.setPixmap(self._pixmaps[0])
@@ -310,13 +583,14 @@ class ConvertTab(QWidget):
         self.worker = None
 
         open_btn = QPushButton("Open video or image…")
+        open_btn.setObjectName("accent")
         open_btn.clicked.connect(self.open_file)
         self.path_label = QLabel("nothing open yet")
-        self.path_label.setStyleSheet("color: #888")
 
         self.crop_view = CropView()
         self.crop_label = QLabel()
         clear_crop = QPushButton("Clear crop")
+        clear_crop.setObjectName("ghost")
         clear_crop.clicked.connect(self.crop_view.clear_crop)
         self.crop_view.changed.connect(
             lambda: self.crop_label.setText(self.crop_view.describe())
@@ -326,6 +600,11 @@ class ConvertTab(QWidget):
         self.name_edit = QLineEdit()
         self.style_box = QComboBox()
         self.style_box.addItems(convert.STYLES)
+        self.style_box.setToolTip(
+            "blocks: color pixels from characters\n"
+            "ascii / braille: text, tinted with your theme\n"
+            "image: the real untouched pixels (kitty terminal)"
+        )
         self.width_spin = QSpinBox(minimum=16, maximum=200, value=48)
         self.fps_spin = QSpinBox(minimum=1, maximum=60, value=15)
         self.start_edit = QLineEdit(placeholderText="e.g. 12 or 0:30")
@@ -351,6 +630,7 @@ class ConvertTab(QWidget):
         self.preview_btn = QPushButton("Preview")
         self.preview_btn.clicked.connect(lambda: self.convert(preview=True))
         self.save_btn = QPushButton("Convert && save")
+        self.save_btn.setObjectName("accent")
         self.save_btn.clicked.connect(lambda: self.convert(preview=False))
         self.progress = QProgressBar()
         self.progress.hide()
@@ -377,15 +657,13 @@ class ConvertTab(QWidget):
         right.addWidget(self.anim_view, 1)
 
         lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(14)
         lay.addLayout(left, 3)
         lay.addLayout(right, 2)
 
     def open_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open video or image", os.path.expanduser("~"),
-            "Videos and images (*.mp4 *.mkv *.webm *.mov *.avi *.m4v "
-            "*.gif *.png *.jpg *.jpeg *.webp);;All files (*)",
-        )
+        path = pick_open(self)
         if not path:
             return
         try:
@@ -395,7 +673,6 @@ class ConvertTab(QWidget):
             return
         self.path = path
         self.path_label.setText(os.path.basename(path))
-        self.path_label.setStyleSheet("")
         self.crop_view.set_image(frame)
         base = os.path.splitext(os.path.basename(path))[0]
         self.name_edit.setText(
@@ -450,20 +727,9 @@ class ConvertTab(QWidget):
         self.finish_worker()
         QMessageBox.warning(self, "motionfetch", msg)
 
-    def meta_for(self, frames, params):
-        return {
-            "mode": "color"
-            if params["style"] in ("blocks", "ascii-color") else "mono",
-            "style": params["style"],
-            "fps": params["fps"],
-            "width": params["width"],
-            "height": len(frames[0]),
-            "source": os.path.basename(params["path"]),
-        }
-
     def on_preview(self, frames):
         self.finish_worker()
-        self.anim_view.show_frames(self.meta_for(frames, self.worker.p), frames)
+        self.anim_view.show_frames(build_meta(frames, self.worker.p), frames)
 
     def on_save_ready(self, frames):
         self.finish_worker()
@@ -480,7 +746,7 @@ class ConvertTab(QWidget):
             )
             if answer != QMessageBox.Yes:
                 return
-        meta = self.meta_for(frames, params)
+        meta = build_meta(frames, params)
         library.save(name, frames, meta, overwrite=True)
         self.anim_view.show_frames(meta, frames)
         self.saved.emit(name)
@@ -498,10 +764,14 @@ class LibraryTab(QWidget):
         gen_btn = QPushButton("Generate built-in…")
         gen_btn.clicked.connect(self.generate)
         link_btn = QPushButton("Create command")
+        link_btn.setObjectName("accent")
         link_btn.clicked.connect(self.make_link)
+        self.copy_btn = QPushButton("Copy command")
+        self.copy_btn.clicked.connect(self.copy_command)
         export_btn = QPushButton("Export GIF/PNG")
         export_btn.clicked.connect(self.export_anim)
         del_btn = QPushButton("Delete")
+        del_btn.setObjectName("ghost")
         del_btn.clicked.connect(self.delete)
 
         left = QVBoxLayout()
@@ -512,11 +782,13 @@ class LibraryTab(QWidget):
         right.addWidget(self.anim_view, 1)
         right.addWidget(self.meta_label)
         btns = QHBoxLayout()
-        for b in (link_btn, export_btn, del_btn):
+        for b in (link_btn, self.copy_btn, export_btn, del_btn):
             btns.addWidget(b)
         right.addLayout(btns)
 
         lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(14)
         lay.addLayout(left, 1)
         lay.addLayout(right, 2)
         self.refresh()
@@ -554,11 +826,14 @@ class LibraryTab(QWidget):
             self.meta_label.setText(str(e))
             return
         self.anim_view.show_frames(meta, frames, font_size=10)
+        note = ""
+        if meta.get("mode") == "image":
+            note = " (needs a kitty-protocol terminal)"
         self.meta_label.setText(
             f"<b>{name}</b> — {meta.get('style')}, {meta['frames']} frames, "
             f"{meta['width']}x{meta['height']} cells, {meta['fps']} fps, "
             f"from {meta.get('source')}<br>"
-            f"terminal: <code>motionfetch fetch {name}</code>"
+            f"terminal: <code>motionfetch fetch {name}</code>{note}"
         )
 
     def generate(self):
@@ -600,14 +875,23 @@ class LibraryTab(QWidget):
         )
         self.refresh(select=name)
 
+    def copy_command(self):
+        name = self.current_name()
+        if not name:
+            return
+        installed = links.installed()
+        cmd = installed.get(name, f"motionfetch fetch {name}")
+        QApplication.clipboard().setText(cmd)
+        self.copy_btn.setText("Copied!")
+        QTimer.singleShot(
+            1500, lambda: self.copy_btn.setText("Copy command")
+        )
+
     def export_anim(self):
         name = self.current_name()
         if not name:
             return
-        out, _ = QFileDialog.getSaveFileName(
-            self, "Export", os.path.expanduser(f"~/{name}.gif"),
-            "GIF (*.gif);;PNG (*.png)",
-        )
+        out = pick_save(self, os.path.expanduser(f"~/{name}.gif"))
         if not out:
             return
         meta, frames = library.load(name)
@@ -636,18 +920,40 @@ class LibraryTab(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, app, settings):
         super().__init__()
+        self.app = app
+        self.settings = settings
         self.setWindowTitle("motionfetch")
-        self.resize(1100, 640)
+        self.resize(1100, 660)
+
         tabs = QTabWidget()
         self.convert_tab = ConvertTab()
         self.library_tab = LibraryTab()
         tabs.addTab(self.convert_tab, "Convert")
         tabs.addTab(self.library_tab, "Library")
+        tabs.setDocumentMode(True)
         self.setCentralWidget(tabs)
         self.convert_tab.saved.connect(self.on_saved)
         self.tabs = tabs
+
+        self.theme = settings.value("theme", "dark")
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("ghost")
+        self.theme_btn.setFixedWidth(44)
+        self.theme_btn.setToolTip("dark / light")
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        tabs.setCornerWidget(self.theme_btn, Qt.TopRightCorner)
+        self._set_theme(self.theme)
+
+    def _set_theme(self, name):
+        self.theme = name
+        apply_theme(self.app, name)
+        self.theme_btn.setText("☀" if name == "dark" else "☾")
+        self.settings.setValue("theme", name)
+
+    def toggle_theme(self):
+        self._set_theme("light" if self.theme == "dark" else "dark")
 
     def on_saved(self, name):
         self.library_tab.refresh(select=name)
@@ -657,7 +963,12 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("motionfetch")
-    win = MainWindow()
+    app.setStyle("Fusion")
+    settings = QSettings("motionfetch", "motionfetch")
+    icon_path = ensure_desktop_entry()
+    if icon_path:
+        app.setWindowIcon(QIcon(icon_path))
+    win = MainWindow(app, settings)
     win.show()
     sys.exit(app.exec())
 

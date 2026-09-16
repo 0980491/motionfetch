@@ -43,7 +43,8 @@ def exists(name: str) -> bool:
 
 
 def save(name, frames, meta, overwrite=False):
-    """frames: list of list-of-lines. meta: dict merged into meta.json."""
+    """frames: list of list-of-lines (text styles) or PIL images ("image"
+    style, stored as PNG). meta: dict merged into meta.json."""
     check_name(name)
     if exists(name) and not overwrite:
         raise LibraryError(f"animation {name!r} already exists (use --force)")
@@ -52,8 +53,11 @@ def save(name, frames, meta, overwrite=False):
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(os.path.join(tmp, "frames"))
     for i, frame in enumerate(frames):
-        with open(os.path.join(tmp, "frames", f"{i:04d}.txt"), "w") as f:
-            f.write("\n".join(frame) + "\n")
+        if isinstance(frame, list):
+            with open(os.path.join(tmp, "frames", f"{i:04d}.txt"), "w") as f:
+                f.write("\n".join(frame) + "\n")
+        else:
+            frame.save(os.path.join(tmp, "frames", f"{i:04d}.png"))
     meta = dict(meta, name=name, frames=len(frames))
     with open(os.path.join(tmp, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
@@ -63,7 +67,8 @@ def save(name, frames, meta, overwrite=False):
 
 
 def load(name: str):
-    """-> (meta, frames) where frames is a list of list-of-lines."""
+    """-> (meta, frames): list-of-lines per frame for text styles, or raw
+    PNG bytes per frame when meta["mode"] == "image"."""
     path = anim_dir(name)
     try:
         with open(os.path.join(path, "meta.json")) as f:
@@ -78,6 +83,9 @@ def load(name: str):
         if fname.endswith(".txt"):
             with open(os.path.join(frame_dir, fname)) as f:
                 frames.append(f.read().split("\n")[: meta["height"]])
+        elif fname.endswith(".png"):
+            with open(os.path.join(frame_dir, fname), "rb") as f:
+                frames.append(f.read())
     if not frames:
         raise LibraryError(f"animation {name!r} has no frames")
     return meta, frames

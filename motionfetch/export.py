@@ -34,7 +34,21 @@ FONT_DIRS = [
 ]
 
 
-def find_font(size):
+def find_font(size, braille=False):
+    if braille:
+        # most coding fonts lack braille glyphs and PIL does no fallback:
+        # ask fontconfig for a monospace font that actually covers them
+        import subprocess
+
+        try:
+            hit = subprocess.run(
+                ["fc-match", "-f", "%{file}", "monospace:charset=2847"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            if hit:
+                return ImageFont.truetype(hit, size)
+        except OSError:
+            pass
     for name in FONT_CANDIDATES:
         for pattern in FONT_DIRS:
             for hit in glob.glob(os.path.join(pattern, name)):
@@ -100,9 +114,28 @@ def render_frame_image(frame, meta, font, cell_w, cell_h, tint=None):
     return img
 
 
+def render_pixel_frame(png_bytes, meta, cell_w, cell_h):
+    """Image-style frames: paste the real pixels into the window mockup."""
+    import io
+
+    pad, bar = 14, 28
+    w = meta["width"] * cell_w + pad * 2
+    h = meta["height"] * cell_h + pad * 2 + bar
+    img = Image.new("RGB", (w, h), BG)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((0, 0, w, bar), fill=CHROME)
+    for i, color in enumerate(DOTS):
+        cx = 16 + i * 20
+        draw.ellipse((cx - 6, bar // 2 - 6, cx + 6, bar // 2 + 6), fill=color)
+    pic = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    pic = pic.resize((meta["width"] * cell_w, meta["height"] * cell_h))
+    img.paste(pic, (pad, bar + pad))
+    return img
+
+
 def export(meta, frames, out_path, fps=None, font_size=15, tint=None,
            max_frames=None):
-    font = find_font(font_size)
+    font = find_font(font_size, braille=meta.get("style") == "braille")
     box = font.getbbox("█")
     cell_w = max(box[2] - box[0], 1)
     cell_h = max(box[3], 1)
@@ -111,9 +144,13 @@ def export(meta, frames, out_path, fps=None, font_size=15, tint=None,
     if os.path.splitext(out_path)[1].lower() == ".png":
         frames = frames[:1]
 
-    images = [
-        render_frame_image(f, meta, font, cell_w, cell_h, tint) for f in frames
-    ]
+    if meta.get("mode") == "image":
+        images = [render_pixel_frame(f, meta, cell_w, cell_h) for f in frames]
+    else:
+        images = [
+            render_frame_image(f, meta, font, cell_w, cell_h, tint)
+            for f in frames
+        ]
     ext = os.path.splitext(out_path)[1].lower()
     if ext == ".png" or len(images) == 1:
         images[0].save(out_path)

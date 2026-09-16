@@ -16,9 +16,10 @@ right — and redraws the block in place. Any keypress (or Ctrl+C) stops it.
 - **GUI or CLI**: a Qt interface (`motionfetch gui`) where cropping is
   dragging a box over the video and the preview plays live — or do it all
   with flags from the terminal.
-- **Three looks**: truecolor pixel `blocks`, classic `ascii` ramp, or
-  high-detail `braille` — ascii and braille are plain text, tinted with your
-  theme's accent color at play time.
+- **Four looks**: truecolor pixel `blocks`, classic `ascii` ramp, high-detail
+  `braille` (ordered dithering, tinted with your theme's accent at play time)
+  — or `image`, the real untouched pixels, drawn with the kitty graphics
+  protocol for terminals that support it (kitty, ghostty).
 - **Built-in generators**: `donut`, `matrix` (digital rain), `cube` — no video
   needed.
 - **Crop before converting**: `--crop-top 15%` drops a caption or watermark
@@ -57,12 +58,19 @@ On Arch: `sudo pacman -S --needed ffmpeg python-pipx` first.
 `motionfetch gui` (or `motionfetch-gui`) opens a Qt interface: open a video,
 **drag a box over the frame to crop** — no percentages, no video editor —
 tweak style/width/fps, watch the converted preview play live, and save.
-The Library tab plays everything you've made and creates the per-animation
-commands with a button.
+The Library tab plays everything you've made, creates the per-animation
+commands, copies the command to the clipboard, exports, deletes.
+
+Details it takes care of on its own: it installs a **menu launcher** (with a
+donut icon) on first run, uses the KDE file dialog when `kdialog` is
+available, and has **dark and light themes** (button in the top-right corner;
+your choice is remembered).
 
 ![the convert tab, cropping a watermark out of a video](screenshots/shot-convert.png)
 
 ![the library tab](screenshots/shot-library.png)
+
+(and [this is the light theme](screenshots/shot-light.png), if that's your thing)
 
 ## Quick start
 
@@ -102,6 +110,7 @@ motionfetch add clip.mp4 --crop-left 10% --crop-right 10%
 | `ascii` | mono, tinted at play time | logo-like sources, theme integration |
 | `ascii-color` | truecolor characters | colorful sources with a retro look |
 | `braille` | mono, tinted at play time | line art, high detail |
+| `image` | the real pixels, not characters | kitty/ghostty terminals only |
 
 Mono animations pick their tint from `$MOTIONFETCH_TINT`, then
 `~/.config/quickshell/colors.json` (matugen setups), then a default blue —

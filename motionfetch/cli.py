@@ -20,6 +20,18 @@ def die(msg):
     sys.exit(1)
 
 
+def encode_pngs(frames):
+    """PIL frames -> list of PNG bytes (image style)."""
+    import io
+
+    out = []
+    for img in frames:
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        out.append(buf.getvalue())
+    return out
+
+
 def crop_dict(args):
     return {
         "top": args.crop_top,
@@ -67,12 +79,21 @@ def cmd_add(args):
         die("conversion produced no frames")
     convert.pad_frames(frames, args.width)
 
+    if args.style == "image":
+        mode = "image"
+        # rows from the actual aspect of the converted frames
+        height = max(
+            1, round(args.width * frames[0].height / frames[0].width * 0.5)
+        )
+    else:
+        mode = "color" if args.style in ("blocks", "ascii-color") else "mono"
+        height = len(frames[0])
     meta = {
-        "mode": "color" if args.style in ("blocks", "ascii-color") else "mono",
+        "mode": mode,
         "style": args.style,
         "fps": args.fps,
         "width": args.width,
-        "height": len(frames[0]),
+        "height": height,
         "source": os.path.basename(source),
     }
 
@@ -80,8 +101,17 @@ def cmd_add(args):
         console.print(
             f"[dim]previewing {len(frames)} frames — press any key to stop[/]"
         )
-        blocks, height = player.frames_to_blocks(meta, frames, args.tint)
-        player.run_loop(blocks, height, args.fps, clear=False)
+        if args.style == "image":
+            try:
+                player.run_kitty_loop(
+                    encode_pngs(frames), meta["width"], meta["height"],
+                    args.fps, clear=False,
+                )
+            except RuntimeError as e:
+                console.print(f"[yellow]no preview:[/] {e}")
+        else:
+            blocks, height = player.frames_to_blocks(meta, frames, args.tint)
+            player.run_loop(blocks, height, args.fps, clear=False)
         try:
             answer = console.input(f"save as [bold]{name}[/]? \\[Y/n] ")
         except (EOFError, KeyboardInterrupt):
@@ -163,6 +193,16 @@ def cmd_play(args):
     problem = player.check_fit(meta["width"], meta["height"])
     if problem:
         die(problem)
+    if meta.get("mode") == "image":
+        try:
+            player.run_kitty_loop(
+                frames, meta["width"], meta["height"],
+                args.fps or meta["fps"], secs=args.secs,
+                clear=not args.no_clear,
+            )
+        except RuntimeError as e:
+            die(e)
+        return
     blocks, height = player.frames_to_blocks(meta, frames, args.tint)
     player.run_loop(
         blocks, height, args.fps or meta["fps"], secs=args.secs,
@@ -176,6 +216,24 @@ def cmd_fetch(args):
         info, info_w = player.fetch_info(args.cmd)
     except RuntimeError as e:
         die(e)
+    if meta.get("mode") == "image":
+        problem = player.check_fit(
+            meta["width"] + args.gap + info_w,
+            max(meta["height"], len(info)),
+        )
+        if problem:
+            sys.stdout.write("\n".join(info) + "\n")
+            console.print(f"[dim]({args.name} hidden: {problem})[/]")
+            return
+        try:
+            player.run_kitty_loop(
+                frames, meta["width"], meta["height"],
+                args.fps or meta["fps"], info_lines=info, gap=args.gap,
+                secs=args.secs, clear=not args.no_clear, once=args.once,
+            )
+        except RuntimeError as e:
+            die(e)
+        return
     blocks, height = player.compose_fetch(
         meta, frames, info, gap=args.gap, tint=args.tint
     )
@@ -223,6 +281,8 @@ def cmd_export(args):
     from . import export
 
     meta, frames = load_or_die(args.name)
+    if args.fetch and meta.get("mode") == "image":
+        die("--fetch export is not supported for the image style yet")
     if args.fetch:
         try:
             info, info_w = player.fetch_info(args.cmd)

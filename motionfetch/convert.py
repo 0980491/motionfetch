@@ -15,7 +15,7 @@ import json
 import shutil
 import subprocess
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .ansi import RESET, bg, fg
 
@@ -24,9 +24,13 @@ RAMP = " .:-=+*#%@"
 # Half-width glyph budget per terminal cell: a cell is roughly twice as tall
 # as it is wide, so one ascii char covers a 1x2 pixel area, a half-block
 # covers 1x1 per half, and a braille cell covers 2x4.
-STYLES = ("blocks", "ascii", "ascii-color", "braille")
+STYLES = ("blocks", "ascii", "ascii-color", "braille", "image")
 
 BRAILLE_BITS = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
+
+# Bayer 4x4 matrix for ordered dithering: braille is 1-bit, and a fixed
+# threshold turns most footage into an all-on or all-off screen.
+BAYER4 = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
 
 
 class ConvertError(Exception):
@@ -73,6 +77,12 @@ def grid_size(src_w, src_h, width, style):
         px_w = cols
         px_h = max(2, round(cols * aspect * 0.5) * 2)
         rows = px_h // 2
+    elif style == "image":
+        # real pixels via the kitty graphics protocol: keep a comfortable
+        # resolution (~10x20 px per cell), the terminal scales to fit
+        rows = max(1, round(cols * aspect * 0.5))
+        px_w = min(cols * 10, 800)
+        px_h = max(1, round(px_w * aspect))
     else:  # ascii
         px_w = cols
         rows = max(1, round(cols * aspect * 0.5))
@@ -100,7 +110,9 @@ def _render_blocks(img, cols, rows):
 
 
 def _luma(img):
-    return img.convert("L")
+    # stretch the contrast so mostly-bright or mostly-dark footage still
+    # spreads over the whole ramp
+    return ImageOps.autocontrast(img.convert("L"), cutoff=2)
 
 
 def _render_ascii(img, cols, rows, gamma, invert, color_img=None):
@@ -127,7 +139,6 @@ def _render_ascii(img, cols, rows, gamma, invert, color_img=None):
 
 def _render_braille(img, cols, rows, gamma, invert):
     gray = _luma(img).load()
-    threshold = 127
     lines = []
     for row in range(rows):
         chars = []
@@ -135,11 +146,11 @@ def _render_braille(img, cols, rows, gamma, invert):
             code = 0x2800
             for dy in range(4):
                 for dx in range(2):
-                    v = gray[col * 2 + dx, row * 4 + dy]
-                    lit = v > threshold
+                    x, y = col * 2 + dx, row * 4 + dy
+                    v = (gray[x, y] / 255) ** gamma
                     if invert:
-                        lit = not lit
-                    if lit:
+                        v = 1 - v
+                    if v > (BAYER4[y % 4][x % 4] + 0.5) / 16:
                         code |= BRAILLE_BITS[dy][dx]
             chars.append(chr(code))
         lines.append("".join(chars))
@@ -147,6 +158,8 @@ def _render_braille(img, cols, rows, gamma, invert):
 
 
 def render_frame(img, style, cols, rows, gamma=1.0, invert=False):
+    if style == "image":
+        return img  # kept as real pixels; stored as PNG, drawn by kitty
     if style == "blocks":
         return _render_blocks(img, cols, rows)
     if style == "ascii":
@@ -241,6 +254,9 @@ def pad_frames(frames, cols):
     """Make every line exactly `cols` visible columns (mono styles only add
     trailing spaces; color styles already emit full-width lines)."""
     from .ansi import visible_len
+
+    if frames and not isinstance(frames[0], list):
+        return frames  # image style: PIL frames, nothing to pad
 
     for frame in frames:
         for i, line in enumerate(frame):
