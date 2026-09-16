@@ -10,7 +10,6 @@ around, and a desktop menu entry that installs itself on first launch.
 
 import io
 import os
-import random
 import shutil
 import subprocess
 import sys
@@ -193,42 +192,8 @@ def pick_save(parent, suggested):
 # ── desktop menu entry ──
 
 
-LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.txt")
-
-
-def logo_art():
-    """The app's ASCII "M" (see the logo credit in the README)."""
-    try:
-        with open(LOGO_PATH) as f:
-            return f.read().rstrip("\n").split("\n")
-    except OSError:
-        return generators.donut(40, 21, 1)[0]
-
-
-def logo_reveal_frames(frames=48, hold=24, seed=3):
-    """The logo drawing itself: cells appear in a diagonal sweep with a
-    dithered frontier, then the finished M holds for a moment."""
-    art = logo_art()
-    h, w = len(art), max(len(line) for line in art)
-    rng = random.Random(seed)
-    jitter = [[rng.uniform(0, 14) for _ in range(w)] for _ in range(h)]
-    out = []
-    for step in range(frames):
-        t = (step + 1) / frames * (w + h + 14)
-        lines = []
-        for y, line in enumerate(art):
-            row = []
-            for x in range(w):
-                ch = line[x] if x < len(line) else " "
-                row.append(ch if x + y + jitter[y][x] < t else " ")
-            lines.append("".join(row))
-        out.append(lines)
-    out.extend([list(art)] * hold)
-    return out, w, h
-
-
 def _make_icon(path):
-    art = logo_art()
+    art = generators.logo_art()
     rows, cols = len(art), max(len(line) for line in art)
     img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -767,9 +732,11 @@ class ConvertTab(QWidget):
 
     def show_logo_intro(self):
         """The M drawing itself in ascii, until a real preview replaces it."""
-        frames, w, h = logo_reveal_frames()
-        meta = {"mode": "mono", "style": "ascii", "fps": 30,
-                "width": w, "height": h}
+        try:
+            frames, meta = generators.make("logo", frames=72)
+        except OSError:
+            return
+        meta = dict(meta, fps=30, style="ascii", mode="mono")
         self.anim_view.show_frames(meta, frames, font_size=11, limit=100)
 
     def open_file(self):
@@ -862,6 +829,17 @@ class ConvertTab(QWidget):
         self.saved.emit(name)
 
 
+class StockWorker(QThread):
+    done = Signal()
+
+    def run(self):
+        try:
+            generators.ensure_stock()
+        except Exception:
+            pass
+        self.done.emit()
+
+
 class LibraryTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -901,7 +879,16 @@ class LibraryTab(QWidget):
         lay.setSpacing(14)
         lay.addLayout(left, 1)
         lay.addLayout(right, 2)
-        self.refresh()
+
+        self._stock_worker = None
+        if not library.list_all():
+            # first run: create the stock pair (donut + logo) off-thread
+            self.list.addItem("creating the stock animations…")
+            self._stock_worker = StockWorker()
+            self._stock_worker.done.connect(lambda: self.refresh())
+            self._stock_worker.start()
+        else:
+            self.refresh()
 
     def current_name(self):
         item = self.list.currentItem()
@@ -953,14 +940,13 @@ class LibraryTab(QWidget):
         )
         if not ok:
             return
-        func, mode = generators.GENERATORS[kind]
-        frames = func(48, 20, 200)
-        convert.pad_frames(frames, 48)
-        meta = {
-            "mode": mode, "style": "generated", "fps": 15,
-            "width": 48, "height": 20, "source": f"builtin:{kind}",
-        }
-        library.save(kind, frames, meta, overwrite=True)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            frames, meta = generators.make(kind)
+            convert.pad_frames(frames, meta["width"])
+            library.save(kind, frames, meta, overwrite=True)
+        finally:
+            QApplication.restoreOverrideCursor()
         self.refresh(select=kind)
 
     def make_link(self):
@@ -1072,9 +1058,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.convert_tab.anim_view.shutdown()
         self.library_tab.anim_view.shutdown()
-        worker = self.convert_tab.worker
-        if worker and worker.isRunning():
-            worker.wait(5000)
+        for worker in (self.convert_tab.worker,
+                       self.library_tab._stock_worker):
+            if worker and worker.isRunning():
+                worker.wait(8000)
         event.accept()
 
 

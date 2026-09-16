@@ -10,6 +10,9 @@ console = Console(highlight=False)
 
 
 def run():
+    from .cli import ensure_stock
+
+    ensure_stock()
     while True:
         metas = library.list_all()
         console.print()

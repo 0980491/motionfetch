@@ -20,8 +20,9 @@ right — and redraws the block in place. Any keypress (or Ctrl+C) stops it.
   `braille` (ordered dithering, tinted with your theme's accent at play time)
   — or `image`, the real untouched pixels, drawn with the kitty graphics
   protocol for terminals that support it (kitty, ghostty).
-- **Built-in generators**: `donut`, `matrix` (digital rain), `cube` — no video
-  needed.
+- **Two stock animations out of the box**: the classic `donut`, and `logo` —
+  the motionfetch M drawing itself. They're created on first run; everything
+  else comes from your own videos and images.
 - **Crop before converting**: `--crop-top 15%` drops a caption or watermark
   without opening a video editor.
 - **A library, not a one-off**: animations are stored by name; list, play,
@@ -31,9 +32,7 @@ right — and redraws the block in place. Any keypress (or Ctrl+C) stops it.
 - **Export previews**: render any animation to a `.gif` or `.png` (that's how
   every image in this README was made).
 
-| `matrix` generator | video → `blocks` | video → `braille` |
-| --- | --- | --- |
-| ![matrix](screenshots/matrix.gif) | ![blocks](screenshots/video-blocks.gif) | ![braille](screenshots/video-braille.gif) |
+![the logo stock animation drawing itself](screenshots/logo.gif)
 
 ## Install
 
@@ -61,21 +60,20 @@ tweak style/width/fps, watch the converted preview play live, and save.
 The Library tab plays everything you've made, creates the per-animation
 commands, copies the command to the clipboard, exports, deletes.
 
-Details it takes care of on its own: it installs a **menu launcher** (with a
-donut icon) on first run, uses the KDE file dialog when `kdialog` is
-available, and has **dark and light themes** (button in the top-right corner;
-your choice is remembered).
+Details it takes care of on its own: it installs a **menu launcher** on first
+run, uses the KDE file dialog when `kdialog` is available, and has **dark and
+light themes** (button in the top-right corner; your choice is remembered).
 
-![the convert tab, cropping a watermark out of a video](screenshots/shot-convert.png)
+![the app, with the logo splash playing](screenshots/gui-splash.png)
 
-![the library tab](screenshots/shot-library.png)
+Cropping a caption out of a GIF, with the converted preview playing live:
 
-(and [this is the light theme](screenshots/shot-light.png), if that's your thing)
+![cropping and previewing a conversion](screenshots/gui-crop.png)
 
 ## Quick start
 
 ```bash
-motionfetch generate donut        # create the classic torus
+motionfetch list                  # first run creates the stock: donut + logo
 motionfetch fetch donut           # spin it beside fastfetch — any key stops it
 motionfetch add cool-video.mp4    # convert a video (shows a preview, then asks)
 motionfetch                       # interactive browser of your library
@@ -112,6 +110,16 @@ motionfetch add clip.mp4 --crop-left 10% --crop-right 10%
 | `braille` | mono, tinted at play time | line art, high detail |
 | `image` | the real pixels, not characters | kitty/ghostty terminals only |
 
+The same video in four styles:
+
+| `blocks` | `ascii` |
+| --- | --- |
+| ![blocks](screenshots/video-blocks.gif) | ![ascii](screenshots/video-ascii.gif) |
+
+| `braille` | `image` |
+| --- | --- |
+| ![braille](screenshots/video-braille.gif) | ![image](screenshots/video-image.gif) |
+
 Mono animations pick their tint from `$MOTIONFETCH_TINT`, then
 `~/.config/quickshell/colors.json` (matugen setups), then a default blue —
 or pass `--tint '#a6e3a1'` explicitly.
@@ -119,11 +127,11 @@ or pass `--tint '#a6e3a1'` explicitly.
 ## Playing
 
 ```bash
-motionfetch play matrix               # fullscreen loop, any key stops it
-motionfetch fetch matrix              # beside fastfetch
-motionfetch fetch matrix --cmd nitch  # beside any other fetch tool
-motionfetch fetch matrix --secs 5     # stop by itself after 5 s
-motionfetch fetch matrix --once       # single static frame (for scripts)
+motionfetch play logo                 # fullscreen loop, any key stops it
+motionfetch fetch logo                # beside fastfetch
+motionfetch fetch logo   --cmd nitch  # beside any other fetch tool
+motionfetch fetch logo   --secs 5     # stop by itself after 5 s
+motionfetch fetch logo   --once       # single static frame (for scripts)
 ```
 
 If the terminal is too narrow for the pair, motionfetch prints the info box
@@ -133,8 +141,8 @@ alone instead of letting the animation wrap.
 
 ```bash
 motionfetch link donut                # installs `fastfetch-donut`
-motionfetch link matrix fastfetch_1   # or name it whatever you want
-motionfetch link cube --play          # command that plays it fullscreen
+motionfetch link logo   fastfetch_1   # or name it whatever you want
+motionfetch link logo --play          # command that plays it fullscreen
 motionfetch unlink fastfetch_1
 ```
 

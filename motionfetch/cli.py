@@ -133,21 +133,15 @@ def cmd_add(args):
 
 
 def cmd_generate(args):
-    func, mode = generators.GENERATORS[args.kind]
     name = args.name or args.kind
     if library.exists(name) and not args.force:
         die(f"animation {name!r} already exists (pick --name or use --force)")
     with console.status(f"rendering [bold]{args.kind}[/] …"):
-        frames = func(args.width, args.height, args.frames)
-    convert.pad_frames(frames, args.width)
-    meta = {
-        "mode": mode,
-        "style": "generated",
-        "fps": args.fps,
-        "width": args.width,
-        "height": args.height,
-        "source": f"builtin:{args.kind}",
-    }
+        frames, meta = generators.make(
+            args.kind, args.width, args.height, args.frames
+        )
+    convert.pad_frames(frames, meta["width"])
+    meta["fps"] = args.fps
     library.save(name, frames, meta, overwrite=args.force)
     console.print(
         f"[green]saved[/] [bold]{name}[/] ({len(frames)} frames) — "
@@ -155,7 +149,18 @@ def cmd_generate(args):
     )
 
 
+def ensure_stock():
+    """First run: create the two stock animations (donut, logo)."""
+    if library.list_all():
+        return
+    with console.status("first run — rendering the stock animations …"):
+        created = generators.ensure_stock()
+    if created:
+        console.print(f"[dim]created stock animations: {', '.join(created)}[/]")
+
+
 def cmd_list(_args):
+    ensure_stock()
     metas = library.list_all()
     if not metas:
         console.print(
@@ -382,13 +387,14 @@ def build_parser():
     add_tint(a)
     a.set_defaults(func=cmd_add)
 
-    g = sub.add_parser("generate", help="create a built-in animation "
-                       "(donut, matrix, cube)")
+    g = sub.add_parser("generate", help="create a stock animation "
+                       "(donut, logo)")
     g.add_argument("kind", choices=sorted(generators.GENERATORS))
     g.add_argument("-n", "--name")
     g.add_argument("-w", "--width", type=int, default=48)
     g.add_argument("--height", type=int, default=20)
-    g.add_argument("--frames", type=int, default=200)
+    g.add_argument("--frames", type=int,
+                   help="frames per loop (default: per animation)")
     g.add_argument("--fps", type=int, default=15)
     g.add_argument("-f", "--force", action="store_true")
     g.set_defaults(func=cmd_generate)

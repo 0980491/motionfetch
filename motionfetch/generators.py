@@ -1,14 +1,14 @@
-"""Built-in animation generators — no video required.
+"""Built-in stock animations — every install starts with these two:
 
-    donut    the classic tumbling torus (a1k0n's math), mono/tintable
-    matrix   digital rain with bright heads and fading tails, green
-    cube     rotating wireframe cube, mono/tintable
+    donut   the classic tumbling torus (a1k0n's math), mono/tintable
+    logo    the motionfetch "M" drawing itself in ascii (see README credits)
+
+Anything else, you convert yourself from a video or image.
 """
 
 import math
+import os
 import random
-
-from .ansi import RESET, fg
 
 DONUT_RAMP = ".,-~:;=!*#$@"
 
@@ -53,119 +53,72 @@ def donut(width=48, height=20, frames=200):
     return out
 
 
-GLYPHS = "01" + "abcdefghijklmnopqrstuvwxyz" + "<>[]{}#$%&*+=;:/\\|"
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.txt")
 
 
-def matrix(width=48, height=20, frames=200, seed=7):
-    """Digital rain. Color frames: white-green heads, tails fading to dark."""
-    rng = random.Random(seed)
-    cols = []
-    for _ in range(width):
-        cols.append(
-            {
-                "y": rng.uniform(-height, 0),
-                "speed": rng.uniform(0.3, 1.0),
-                "tail": rng.randint(4, height - 2),
-                "glyphs": [rng.choice(GLYPHS) for _ in range(height)],
-            }
-        )
+def logo_art():
+    """The app's ASCII "M" (Letter M Logo from logowik.com, see README)."""
+    with open(LOGO_PATH) as f:
+        return f.read().rstrip("\n").split("\n")
+
+
+def logo(width=None, height=None, frames=96):
+    """The M drawing itself: cells appear in a diagonal sweep with a
+    dithered frontier, then the finished logo holds for the rest of the
+    loop. width/height are fixed by the artwork and ignored."""
+    art = logo_art()
+    h, w = len(art), max(len(line) for line in art)
+    art = [line.ljust(w) for line in art]
+    reveal = min(48, max(8, frames * 2 // 3))
+    hold = max(frames - reveal, 8)
+    rng = random.Random(3)
+    jitter = [[rng.uniform(0, 14) for _ in range(w)] for _ in range(h)]
     out = []
-    # warm-up: let the rain fall for a while before recording, so the first
-    # frame is not an empty screen
-    for step in range(40 + frames):
-        record = step >= 40
-        grid = [[" ", None] for _ in range(width * height)]
-        for x, c in enumerate(cols):
-            c["y"] += c["speed"]
-            if c["y"] - c["tail"] > height:
-                c["y"] = rng.uniform(-height / 2, 0)
-                c["speed"] = rng.uniform(0.3, 1.0)
-                c["tail"] = rng.randint(4, height - 2)
-            if rng.random() < 0.2:
-                c["glyphs"][rng.randrange(height)] = rng.choice(GLYPHS)
-            head = int(c["y"])
-            for k in range(c["tail"]):
-                y = head - k
-                if not 0 <= y < height:
-                    continue
-                fade = 1 - k / c["tail"]
-                if k == 0:
-                    color = (200, 255, 200)
-                else:
-                    g = int(80 + 175 * fade)
-                    color = (0, g, int(g * 0.35))
-                grid[x + y * width] = [c["glyphs"][y % height], color]
-        if not record:
-            continue
+    for step in range(reveal):
+        t = (step + 1) / reveal * (w + h + 14)
         lines = []
-        for y in range(height):
-            parts, last = [], None
-            for x in range(width):
-                ch, color = grid[x + y * width]
-                if color and color != last:
-                    parts.append(fg(*color))
-                    last = color
-                parts.append(ch)
-            lines.append("".join(parts) + RESET)
+        for y in range(h):
+            row = []
+            for x in range(w):
+                ch = art[y][x]
+                row.append(ch if x + y + jitter[y][x] < t else " ")
+            lines.append("".join(row))
         out.append(lines)
-    return out
-
-
-CUBE_VERTS = [
-    (x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)
-]
-CUBE_EDGES = [
-    (a, b)
-    for a in range(8)
-    for b in range(a + 1, 8)
-    if bin(a ^ b).count("1") == 1
-]
-
-
-def cube(width=48, height=20, frames=120):
-    """Wireframe cube tumbling on two axes."""
-    out = []
-    for f in range(frames):
-        a = 2 * math.pi * f / frames
-        b = 4 * math.pi * f / frames
-        ca, sa, cb, sb = math.cos(a), math.sin(a), math.cos(b), math.sin(b)
-        pts = []
-        for x, y, z in CUBE_VERTS:
-            # rotate around Y then X
-            x, z = x * cb + z * sb, -x * sb + z * cb
-            y, z = y * ca - z * sa, y * sa + z * ca
-            d = 1 / (z + 4)
-            pts.append(
-                (
-                    width / 2 + width * 1.1 * d * x,
-                    height / 2 + height * 1.05 * d * y,
-                    d,
-                )
-            )
-        grid = [" "] * (width * height)
-        for i, j in CUBE_EDGES:
-            x0, y0, d0 = pts[i]
-            x1, y1, d1 = pts[j]
-            steps = int(max(abs(x1 - x0), abs(y1 - y0)) * 2) + 1
-            for s in range(steps + 1):
-                t = s / steps
-                x = int(x0 + (x1 - x0) * t)
-                y = int(y0 + (y1 - y0) * t)
-                d = d0 + (d1 - d0) * t
-                if 0 <= x < width and 0 <= y < height:
-                    grid[x + y * width] = "#" if d > 0.26 else "+"
-        for x, y, d in pts:
-            xi, yi = int(x), int(y)
-            if 0 <= xi < width and 0 <= yi < height:
-                grid[xi + yi * width] = "@"
-        out.append(
-            ["".join(grid[k * width : (k + 1) * width]) for k in range(height)]
-        )
+    out.extend([list(art)] * hold)
     return out
 
 
 GENERATORS = {
     "donut": (donut, "mono"),
-    "matrix": (matrix, "color"),
-    "cube": (cube, "mono"),
+    "logo": (logo, "mono"),
 }
+
+
+def make(kind, width=48, height=20, frames=None):
+    """Render one stock animation -> (frames, meta). Sizes are taken from
+    the frames themselves, since some generators fix their own canvas."""
+    func, mode = GENERATORS[kind]
+    frames_list = func(width, height, frames) if frames else func(width, height)
+    h = len(frames_list[-1])
+    w = max(len(line) for line in frames_list[-1])
+    meta = {
+        "mode": mode, "style": "generated", "fps": 15,
+        "width": w, "height": h, "source": f"builtin:{kind}",
+    }
+    return frames_list, meta
+
+
+def ensure_stock():
+    """First run: give the library its two stock animations.
+    -> list of names created (empty when the library already has content)."""
+    from . import convert, library
+
+    if library.list_all():
+        return []
+    created = []
+    for kind in GENERATORS:
+        frames, meta = make(kind)
+        convert.pad_frames(frames, meta["width"])
+        library.save(kind, frames, meta, overwrite=True)
+        created.append(kind)
+    return created
