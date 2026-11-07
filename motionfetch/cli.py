@@ -479,7 +479,22 @@ def build_parser():
     gu = sub.add_parser("gui", help="open the graphical interface")
     gu.set_defaults(func=cmd_gui)
 
+    # Only here so it shows in --help: __main__ dispatches `greet` before this
+    # module is even imported (see greet.py for why).
+    gr = sub.add_parser(
+        "greet", add_help=False,
+        help="an animation in every new terminal (motionfetch greet --help)",
+    )
+    gr.add_argument("rest", nargs=argparse.REMAINDER)
+    gr.set_defaults(func=lambda a: sys.exit(_greet_main(a.rest)))
+
     return p
+
+
+def _greet_main(argv):
+    from .greet import main
+
+    return main(argv)
 
 
 def cmd_gui(_args):

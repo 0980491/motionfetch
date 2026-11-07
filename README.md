@@ -34,6 +34,9 @@ right — and redraws the block in place. Any keypress (or Ctrl+C) stops it.
   rename, remove.
 - **One command per animation**: `motionfetch link donut fastfetch_1` installs
   a `fastfetch_1` command — make as many as you like and switch between them.
+- **Greet every new terminal**: `motionfetch greet` plays one animation from
+  your rotation beside fastfetch when a kitty window opens — and the prompt is
+  yours immediately, because kitty keeps animating it on its own.
 - **Export previews**: render any animation to a `.gif` or `.png` (that's how
   every image in this README was made).
 
@@ -179,6 +182,41 @@ shell rc:
 ```bash
 alias fastfetch='motionfetch fetch donut'
 ```
+
+## An animation in every new terminal
+
+`fetch` owns the terminal until you press a key. `greet` doesn't: it hands the
+frames to kitty over the graphics protocol, tells kitty to loop them, and
+exits. The animation keeps playing in the scrollback while you type, scrolls
+away with the text, and disappears on `clear`.
+
+```bash
+motionfetch greet --hook bash >> ~/.bashrc   # or zsh / fish
+motionfetch greet --use donut                # always the donut
+motionfetch greet --use donut logo cat       # random from these three
+motionfetch greet --all                      # random from the whole library
+motionfetch greet --no-fetch                 # the animation alone
+motionfetch greet --off                      # stop (the hook stays, does nothing)
+motionfetch greet --status
+```
+
+In the GUI it's the checkboxes in the Library tab: whatever is ticked is in
+the rotation (one ticked = always that one, none = everything), and the
+"New terminals" box turns it on and off. The same animation never plays
+twice in a row.
+
+Text styles are rendered once to transparent PNGs at your terminal's exact
+cell size and cached in `~/.cache/motionfetch/greet`; after that a new
+terminal costs about 60 ms, fastfetch included. Mono animations are tinted
+with your theme's accent, so a theme change makes them stale —
+`motionfetch greet --warm` re-renders the rotation in advance; run it from
+your theming hook (matugen's `post_hook`, pywal's, …).
+
+It needs kitty (the terminal that can animate an image by itself); anywhere
+else it quietly does nothing, so the hook is safe in a shared rc file.
+Clips longer than 120 frames are thinned out to keep kitty's memory down,
+and a terminal too narrow for the pair shrinks the animation, then drops the
+info box.
 
 ## Exporting previews
 

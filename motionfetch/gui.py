@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import convert, export, generators, library, links, player
+from . import convert, export, generators, greet, library, links, player
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
 
@@ -114,6 +114,12 @@ QCheckBox::indicator {{
     border: 1px solid {surface2}; background: {mantle};
 }}
 QCheckBox::indicator:checked {{ background: {accent}; }}
+QListWidget::indicator {{
+    width: 14px; height: 14px; border-radius: 4px;
+    border: 1px solid {surface2}; background: {base};
+}}
+QListWidget::indicator:checked {{ background: {accent}; border-color: {accent}; }}
+QLabel#sub {{ color: {sub}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; }}
 QScrollBar::handle:vertical {{
     background: {surface2}; border-radius: 5px; min-height: 30px;
@@ -1044,8 +1050,38 @@ class LibraryTab(QWidget):
         del_btn.setObjectName("ghost")
         del_btn.clicked.connect(self.delete)
 
+        # The rotation for new terminals is the list's checkboxes: whatever
+        # is ticked gets picked at random when a terminal opens (one ticked =
+        # always that one, none = the whole library). Saved on every click.
+        self.greet_cfg = greet.load_config()
+        self.list.itemChanged.connect(self.on_check)
+        self.greet_box = QGroupBox("New terminals")
+        self.greet_on = QCheckBox("Play an animation when a terminal opens")
+        self.greet_on.setChecked(self.greet_cfg["enabled"])
+        self.greet_on.toggled.connect(lambda v: self.save_greet(enabled=v))
+        self.greet_fetch = QCheckBox("fastfetch beside it")
+        self.greet_fetch.setChecked(self.greet_cfg["fetch"])
+        self.greet_fetch.toggled.connect(lambda v: self.save_greet(fetch=v))
+        self.greet_note = QLabel()
+        self.greet_note.setWordWrap(True)
+        self.greet_note.setObjectName("sub")
+        # a wrapped QLabel inside a QGroupBox under-reports its height and
+        # the second line gets cut; reserve two lines up front
+        self.greet_note.setMinimumHeight(
+            self.greet_note.fontMetrics().lineSpacing() * 2 + 4
+        )
+        try_btn = QPushButton("Open a terminal")
+        try_btn.setToolTip("Opens kitty, which greets with the rotation")
+        try_btn.clicked.connect(self.try_terminal)
+        gl = QVBoxLayout(self.greet_box)
+        gl.addWidget(self.greet_on)
+        gl.addWidget(self.greet_fetch)
+        gl.addWidget(self.greet_note)
+        gl.addWidget(try_btn)
+
         left = QVBoxLayout()
         left.addWidget(self.list, 1)
+        left.addWidget(self.greet_box)
         left.addWidget(gen_btn)
 
         right = QVBoxLayout()
@@ -1077,8 +1113,10 @@ class LibraryTab(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def refresh(self, select=None):
+        self.list.blockSignals(True)
         self.list.clear()
         installed = links.installed()
+        pool = set(self.greet_cfg["pool"])
         for meta in library.list_all():
             name = meta["name"]
             label = f"{name}   {meta['width']}x{meta['height']}, " \
@@ -1087,11 +1125,62 @@ class LibraryTab(QWidget):
                 label += f"   → {installed[name]}"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if name in pool else Qt.Unchecked)
+            item.setToolTip("Ticked = in the rotation for new terminals")
             self.list.addItem(item)
             if name == select:
                 self.list.setCurrentItem(item)
-        if select is None and self.list.count():
+        self.list.blockSignals(False)
+        if select is None and self.list.count() and not self.list.currentItem():
             self.list.setCurrentRow(0)
+        self.update_greet_note()
+
+    def on_check(self, _item):
+        pool = []
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            if it.checkState() == Qt.Checked:
+                pool.append(it.data(Qt.UserRole))
+        self.save_greet(pool=pool)
+
+    def save_greet(self, **changes):
+        self.greet_cfg.update(changes)
+        try:
+            greet.save_config(self.greet_cfg)
+        except OSError as e:
+            QMessageBox.warning(self, "motionfetch", str(e))
+        self.update_greet_note()
+
+    def update_greet_note(self):
+        cfg = self.greet_cfg
+        names = {m["name"] for m in library.list_all()}
+        pool = [n for n in cfg["pool"] if n in names]
+        if not cfg["enabled"]:
+            text = "Off: new terminals open with a bare prompt."
+        elif not pool:
+            text = "Nothing ticked: a random one from the whole library."
+        elif len(pool) == 1:
+            text = f"Always <b>{pool[0]}</b>. Tick more to randomise."
+        else:
+            text = f"Random from the {len(pool)} ticked, never the same " \
+                   "one twice in a row."
+        self.greet_note.setText(text)
+        self.greet_fetch.setEnabled(cfg["enabled"])
+
+    def try_terminal(self):
+        if not shutil.which("kitty"):
+            QMessageBox.information(
+                self, "motionfetch",
+                "The greeting needs kitty: it is the terminal that can play "
+                "an animation by itself while you type.",
+            )
+            return
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("MOTIONFETCH_GREETED", "KITTY_WINDOW_ID",
+                            "KITTY_PID")}
+        subprocess.Popen(["kitty"], env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def on_select(self, item, _prev=None):
         if not item:
