@@ -1051,7 +1051,7 @@ class LibraryTab(QWidget):
         del_btn.clicked.connect(self.delete)
 
         # The rotation for new terminals is the list's checkboxes: whatever
-        # is ticked gets picked at random when a terminal opens (one ticked =
+        # is ticked plays in turn, one per new terminal, in list order (one ticked =
         # always that one, none = the whole library). Saved on every click.
         self.greet_cfg = greet.load_config()
         self.list.itemChanged.connect(self.on_check)
@@ -1159,12 +1159,12 @@ class LibraryTab(QWidget):
         if not cfg["enabled"]:
             text = "Off: new terminals open with a bare prompt."
         elif not pool:
-            text = "Nothing ticked: a random one from the whole library."
+            text = "Nothing ticked: the whole library, one after another."
         elif len(pool) == 1:
-            text = f"Always <b>{pool[0]}</b>. Tick more to randomise."
+            text = f"Always <b>{pool[0]}</b>. Tick more to take turns."
         else:
-            text = f"Random from the {len(pool)} ticked, never the same " \
-                   "one twice in a row."
+            text = f"The {len(pool)} ticked take turns, in list order: " \
+                   "each new terminal gets the next one."
         self.greet_note.setText(text)
         self.greet_fetch.setEnabled(cfg["enabled"])
 

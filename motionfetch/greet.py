@@ -51,12 +51,15 @@ CACHE = os.path.join(
 )
 LAST = os.path.join(CACHE, "last")
 CELLS = os.path.join(CACHE, "cells.json")   # cell sizes seen, for --warm
+WARM_LOCK = os.path.join(CACHE, "warm.lock")
+WARM_AGAIN = os.path.join(CACHE, "warm.again")
 
 DEFAULTS = {"enabled": True, "pool": [], "fetch": True}
 
 GAP = 3            # columns between the animation and the info box
 MAX_FRAMES = 120   # kitty keeps every frame; longer clips get thinned out
 KEEP_RENDERS = 3   # cached renders per animation (cell sizes x tints)
+WARM_AHEAD = 3     # upcoming animations --warm keeps rendered
 
 # Bumping this throws every cached render away — for raster.py changes.
 RENDER_VERSION = 1
@@ -88,28 +91,65 @@ def save_config(cfg):
     os.rename(tmp, CONFIG)
 
 
-def pick(cfg, exclude_last=True):
-    """A random animation from the pool, never the same one twice in a row
-    when there is anything else to choose from."""
+def _rotation(cfg):
+    """-> (pool in play order, whole library in order)."""
     names = [m["name"] for m in library.list_all()]
     pool = [n for n in cfg["pool"] if n in names] if cfg["pool"] else names
+    return pool, names
+
+
+def _after(last, pool, names):
+    """The one that comes after `last`. Keyed on the name rather than an
+    index, so ticking or unticking animations keeps the place in the list."""
+    if last in pool:
+        return pool[(pool.index(last) + 1) % len(pool)]
+    if last in names:
+        # the last one was unticked: carry on from where it sat in the
+        # library instead of jumping back to the start
+        after = names[names.index(last) + 1:] + names
+        return next((n for n in after if n in pool), pool[0])
+    return pool[0]
+
+
+def pick(cfg):
+    """The next animation in the pool, in order, wrapping around: open ten
+    terminals and you see the pool go by one after another, no repeats until
+    it starts over."""
+    pool, names = _rotation(cfg)
     if not pool:
         return None
-    last = None
-    if exclude_last and len(pool) > 1:
-        try:
-            with open(LAST) as f:
-                last = f.read().strip()
-        except OSError:
-            pass
-    choice = random.choice([n for n in pool if n != last] or pool)
     try:
         os.makedirs(CACHE, exist_ok=True)
-        with open(LAST, "w") as f:
-            f.write(choice)
+        f = open(LAST, "a+")
     except OSError:
-        pass
+        return pool[0]
+    with f:
+        # Locked: terminals opened together (a restored session, a split)
+        # each take the next one instead of all reading the same "last".
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        choice = _after(f.read().strip(), pool, names)
+        f.seek(0)
+        f.truncate()
+        f.write(choice)
     return choice
+
+
+def upcoming(cfg, n):
+    """The next n the rotation will play, without moving it."""
+    pool, names = _rotation(cfg)
+    if not pool:
+        return []
+    try:
+        with open(LAST) as f:
+            last = f.read().strip()
+    except OSError:
+        last = ""
+    out = []
+    for _ in range(min(n, len(pool))):
+        last = _after(last, pool, names)
+        out.append(last)
+    return out
 
 
 # ── terminal ──
@@ -164,8 +204,9 @@ def _send(out, ctrl, path, local):
 # ── frames ──
 
 
-def frame_paths(name, meta, cw, ch):
-    """-> (list of PNG paths, gap in ms). Renders into the cache on a miss."""
+def frame_paths(name, meta, cw, ch, render=True):
+    """-> (list of PNG paths, gap in ms). Renders into the cache on a miss,
+    or returns None there when render=False (a cheap "is it cached?")."""
     stride = max(1, -(-meta["frames"] // MAX_FRAMES))  # ceil
     gap = max(10, round(1000 * stride / max(meta.get("fps", 15), 1)))
     src = library.anim_dir(name)
@@ -186,6 +227,8 @@ def frame_paths(name, meta, cw, ch):
     home = os.path.join(CACHE, name)
     out = os.path.join(home, key)
     if not os.path.isfile(os.path.join(out, "done")):
+        if not render:
+            return None
         from . import raster  # numpy + PIL: only on a cache miss
         _, frames = library.load(name)
         raster.render(meta, frames[::stride], cw, ch, tint, out)
@@ -223,27 +266,72 @@ def remember_cells(cw, ch):
         pass
 
 
-def warm(cfg):
-    """Render the whole rotation ahead of time for the cell sizes terminals
-    have used. Mono animations are tinted with the wallpaper's accent, so a
-    wallpaper change invalidates them; run this from the theming hook and
-    the next terminal opens without the one-second render."""
+def _meta(name):
+    with open(os.path.join(library.anim_dir(name), "meta.json")) as f:
+        return json.load(f)
+
+
+def warm(cfg, ahead=WARM_AHEAD):
+    """Render the next few animations of the rotation ahead of time, for the
+    cell sizes terminals have used. The rotation is a fixed order, so the
+    next few are all that can be needed — rendering the whole library on
+    every theme change cost ~20 s of CPU, and clicking through styles in
+    the settings stacked one of those per click.
+
+    Mono animations are tinted with the wallpaper's accent, so a theme change
+    makes them stale: this runs from the theming hook, and after a greeting
+    whose successor was not cached yet. One at a time: a second call while
+    one runs just asks it to go round once more (the tint may have changed
+    under it), then returns."""
     try:
         with open(CELLS) as f:
-            cells = [tuple(c) for c in json.load(f)]
+            cells = [tuple(c) for c in json.load(f)][:2]
     except (OSError, ValueError, TypeError):
         return 0
-    names = [m["name"] for m in library.list_all()]
-    pool = [n for n in cfg["pool"] if n in names] if cfg["pool"] else names
-    for name in pool:
-        try:
-            with open(os.path.join(library.anim_dir(name), "meta.json")) as f:
-                meta = json.load(f)
-            for cw, ch in cells:
-                frame_paths(name, meta, cw, ch)
-        except Exception:
-            continue
+    os.makedirs(CACHE, exist_ok=True)
+    lock = open(WARM_LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        open(WARM_AGAIN, "w").close()
+        return 0
+    with lock:
+        while True:
+            try:
+                os.unlink(WARM_AGAIN)
+            except OSError:
+                pass
+            for name in upcoming(cfg, ahead):
+                try:
+                    meta = _meta(name)
+                    for cw, ch in cells:
+                        frame_paths(name, meta, cw, ch)
+                except Exception:
+                    continue
+            if not os.path.exists(WARM_AGAIN):
+                break
     return 0
+
+
+def warm_next_if_needed(cfg, cw, ch):
+    """After a greeting: if the next one is not rendered for this terminal,
+    render it now in the background, so the next terminal never waits."""
+    nxt = upcoming(cfg, 1)
+    if not nxt:
+        return
+    try:
+        if frame_paths(nxt[0], _meta(nxt[0]), cw, ch, render=False):
+            return
+    except (OSError, ValueError):
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "motionfetch", "greet", "--warm"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError:
+        pass
 
 
 # ── the greeting ──
@@ -297,6 +385,7 @@ def fit(meta, cols, rows, info_w, info_h):
 
 def greet(name=None, cfg=None):
     cfg = cfg or load_config()
+    explicit = name is not None
     if not (sys.stdout.isatty() and kitty_ok()):
         return 0
     name = name or pick(cfg)
@@ -357,6 +446,8 @@ def greet(name=None, cfg=None):
     down = height - anim_off
     out.write(f"\x1b[{down}B\r".encode() if down else b"\r")
     out.flush()
+    if not explicit:
+        warm_next_if_needed(cfg, cw, ch)
     return 0
 
 
@@ -395,11 +486,11 @@ def status(cfg):
     print(f"greeting:  {'on' if cfg['enabled'] else 'off'}")
     print(f"fastfetch: {'beside it' if cfg['fetch'] else 'off'}")
     if not pool:
-        print(f"rotation:  the whole library ({len(names)} animations)")
+        print(f"rotation:  the whole library in turn ({len(names)} animations)")
     elif len(pool) == 1:
         print(f"rotation:  always {pool[0]}")
     else:
-        print(f"rotation:  random from {', '.join(pool)}")
+        print(f"rotation:  in turn: {', '.join(pool)}")
     if missing:
         print(f"           (not in the library: {', '.join(missing)})")
     print(f"config:    {CONFIG}")
@@ -414,7 +505,8 @@ def build_parser():
     )
     p.add_argument("--name", help="play this one now, ignoring the rotation")
     p.add_argument("--use", nargs="+", metavar="NAME",
-                   help="rotation = exactly these (one = always that one)")
+                   help="rotation = exactly these, played in this order "
+                        "(one = always that one)")
     p.add_argument("--add", nargs="+", metavar="NAME",
                    help="add to the rotation")
     p.add_argument("--remove", nargs="+", metavar="NAME",

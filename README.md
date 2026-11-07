@@ -193,8 +193,8 @@ away with the text, and disappears on `clear`.
 ```bash
 motionfetch greet --hook bash >> ~/.bashrc   # or zsh / fish
 motionfetch greet --use donut                # always the donut
-motionfetch greet --use donut logo cat       # random from these three
-motionfetch greet --all                      # random from the whole library
+motionfetch greet --use donut logo cat       # these three, in turn
+motionfetch greet --all                      # the whole library, in turn
 motionfetch greet --no-fetch                 # the animation alone
 motionfetch greet --off                      # stop (the hook stays, does nothing)
 motionfetch greet --status
@@ -202,15 +202,20 @@ motionfetch greet --status
 
 In the GUI it's the checkboxes in the Library tab: whatever is ticked is in
 the rotation (one ticked = always that one, none = everything), and the
-"New terminals" box turns it on and off. The same animation never plays
-twice in a row.
+"New terminals" box turns it on and off. They take turns in list order —
+each new terminal gets the next one, and it wraps around at the end — so
+opening a dozen terminals never shows the same one twice in a row.
 
 Text styles are rendered once to transparent PNGs at your terminal's exact
 cell size and cached in `~/.cache/motionfetch/greet`; after that a new
-terminal costs about 60 ms, fastfetch included. Mono animations are tinted
-with your theme's accent, so a theme change makes them stale —
-`motionfetch greet --warm` re-renders the rotation in advance; run it from
-your theming hook (matugen's `post_hook`, pywal's, …).
+terminal costs about 50 ms, fastfetch included, plus kitty loading the frames
+(20–120 ms depending on the clip). Because the rotation is a fixed order,
+motionfetch knows which one is next: if it isn't rendered yet, it renders it
+in the background right after greeting, so the next terminal never waits.
+Mono animations are tinted with your theme's accent, so a theme change makes
+them stale — `motionfetch greet --warm` re-renders the next few in advance;
+run it from your theming hook (matugen's `post_hook`, pywal's, …). Only one
+runs at a time, so a burst of theme changes costs one render, not one each.
 
 It needs kitty (the terminal that can animate an image by itself); anywhere
 else it quietly does nothing, so the hook is safe in a shared rc file.
